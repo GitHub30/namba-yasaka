@@ -24,8 +24,9 @@
   body.mobile #touch { display: block; position: absolute; inset: 0; pointer-events: none; }
   body.mobile #start { display: grid; position: absolute; inset: 0; place-content: center; text-align: center; background: rgba(6, 10, 16, .82); font-size: 18px; line-height: 1.9; z-index: 5; }
   #start small { font-size: 12px; opacity: .7; }
-  #stick { position: absolute; left: max(22px, env(safe-area-inset-left)); bottom: 22px; width: 132px; height: 132px; border-radius: 50%;
-    background: rgba(255, 255, 255, .10); border: 2px solid rgba(255, 255, 255, .28); pointer-events: auto; }
+  /* the stick is hidden until a finger lands on the left half of the screen, and then appears under that finger */
+  #stick { position: absolute; display: none; left: 0; top: 0; width: 132px; height: 132px; box-sizing: border-box; border-radius: 50%;
+    background: rgba(255, 255, 255, .10); border: 2px solid rgba(255, 255, 255, .28); pointer-events: none; }
   #knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(255, 255, 255, .42); }
   .tb { position: absolute; display: grid; place-content: center; width: 62px; height: 62px; border-radius: 50%; font: 600 13px/1.15 system-ui, sans-serif; text-align: center;
     color: #fff; background: rgba(20, 28, 40, .50); border: 2px solid rgba(255, 255, 255, .34); pointer-events: auto; }

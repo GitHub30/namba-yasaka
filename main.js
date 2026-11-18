@@ -228,31 +228,60 @@ async function main() {
     document.addEventListener("fullscreenchange", syncFull);
     $("start").addEventListener("pointerup", async () => { $("start").style.display = "none"; await goFullscreen(); syncFull(); });
     fullBtn.addEventListener("pointerup", goFullscreen);
-    // joystick
-    let stickId = null;
-    const stickMove = (e) => {
-      const r = stick.getBoundingClientRect();
-      let [dx, dy] = toLocal(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
-      const R = 50, l = Math.hypot(dx, dy);
-      if (l > R) { dx *= R / l; dy *= R / l; }
-      knob.style.transform = `translate(${dx}px, ${dy}px)`;
-      const dead = (v) => (Math.abs(v) < 0.14 ? 0 : v);
-      touch.mx = dead(dx / R); touch.my = dead(-dy / R);
-    };
-    stick.addEventListener("pointerdown", (e) => { stickId = e.pointerId; stick.setPointerCapture(e.pointerId); stickMove(e); e.preventDefault(); });
-    stick.addEventListener("pointermove", (e) => { if (e.pointerId === stickId) stickMove(e); });
-    const stickEnd = (e) => { if (e.pointerId === stickId) { stickId = null; touch.mx = touch.my = 0; knob.style.transform = ""; } };
-    stick.addEventListener("pointerup", stickEnd); stick.addEventListener("pointercancel", stickEnd);
-    // look: drag anywhere else on the screen
+    // Movement stick and look, both driven by raw touch events on the whole screen and by how far each finger has moved
+    // since it went down (no element rectangles involved, so page rotation, safe areas and browser bars cannot skew it):
+    //  - a finger that lands on the left half makes the stick appear under it and drives movement
+    //  - any other finger drags the view
+    const SR = 56;                                       // stick travel in CSS px
+    const toScreenLocal = (x, y) => (rotated() ? [y, innerWidth - x] : [x, y]);   // screen px -> px inside #root
+    const rootW = () => (rotated() ? innerHeight : innerWidth);
+    let moveId = null, moveFrom = [0, 0];
     const looks = new Map();
-    canvas.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") { looks.set(e.pointerId, [e.clientX, e.clientY]); canvas.setPointerCapture(e.pointerId); } });
-    canvas.addEventListener("pointermove", (e) => {
-      const p = looks.get(e.pointerId); if (!p) return;
-      const [dx, dy] = toLocal(e.clientX - p[0], e.clientY - p[1]);
-      lookX += dx * 2.0; lookY += dy * 2.0; looks.set(e.pointerId, [e.clientX, e.clientY]);
-    });
-    const lookEnd = (e) => looks.delete(e.pointerId);
-    canvas.addEventListener("pointerup", lookEnd); canvas.addEventListener("pointercancel", lookEnd);
+    const onControl = (t) => !!(t.target && t.target.closest && t.target.closest(".tb, #start"));
+    const stickSet = (dx, dy) => {
+      const l = Math.hypot(dx, dy);
+      if (l > SR) { dx *= SR / l; dy *= SR / l; }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      const dead = (v) => (Math.abs(v) < 0.12 ? 0 : v);
+      touch.mx = dead(dx / SR); touch.my = dead(-dy / SR);
+    };
+    rootEl.addEventListener("touchstart", (e) => {
+      updateRotation();
+      for (const t of e.changedTouches) {
+        if (onControl(t)) continue;
+        const [lx, ly] = toScreenLocal(t.clientX, t.clientY);
+        if (moveId === null && lx < rootW() * 0.5) {
+          moveId = t.identifier; moveFrom = [t.clientX, t.clientY];
+          stick.style.left = `${lx - 66}px`; stick.style.top = `${ly - 66}px`; stick.style.display = "block";
+          stickSet(0, 0);
+        } else {
+          looks.set(t.identifier, [t.clientX, t.clientY]);
+        }
+      }
+      if (![...e.changedTouches].some(onControl)) e.preventDefault();
+    }, { passive: false });
+    rootEl.addEventListener("touchmove", (e) => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === moveId) {
+          const [dx, dy] = toLocal(t.clientX - moveFrom[0], t.clientY - moveFrom[1]);
+          stickSet(dx, dy);
+        } else if (looks.has(t.identifier)) {
+          const p = looks.get(t.identifier);
+          const [dx, dy] = toLocal(t.clientX - p[0], t.clientY - p[1]);
+          lookX += dx * 2.2; lookY += dy * 2.2;
+          looks.set(t.identifier, [t.clientX, t.clientY]);
+        }
+      }
+      e.preventDefault();
+    }, { passive: false });
+    const touchEnd = (e) => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === moveId) { moveId = null; touch.mx = touch.my = 0; stick.style.display = "none"; knob.style.transform = ""; }
+        looks.delete(t.identifier);
+      }
+    };
+    rootEl.addEventListener("touchend", touchEnd); rootEl.addEventListener("touchcancel", touchEnd);
+    window.__touch = touch;
     // buttons
     const tap = (id, fn) => $(id).addEventListener("pointerdown", (e) => { e.preventDefault(); fn(); });
     const hold = (id, key) => {
