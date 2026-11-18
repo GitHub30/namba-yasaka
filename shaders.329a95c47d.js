@@ -497,6 +497,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
     outA = clamp(max(fres, 0.38) + lit * night * 0.5, 0.0, 1.0) * max(alpha, 0.35) + 0.25;
   }
   col = applyFog(col, i.wpos);
+  if (i.fade < 0.5 && kind != 11u) { outA = 0.5; }       // marks moving objects for the temporal pass
   return vec4f(col, clamp(outA, 0.0, 1.0));
 }
 
@@ -668,7 +669,9 @@ fn itm(c: vec3f) -> vec3f { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4);
   let dims = vec2i(U.res);
   var ao = 1.0;
   if (U.ssao > 0.0) { ao = mix(1.0, ssao(px), U.ssao); }
-  let c = tm(textureLoad(cur, px, 0).rgb);
+  let c4 = textureLoad(cur, px, 0);
+  let moving = c4.a > 0.25 && c4.a < 0.75;
+  let c = tm(c4.rgb);
   var mn = c; var mx = c;
   var dmin = textureLoad(depthTex, px, 0);
   var dpx = px;
@@ -692,8 +695,10 @@ fn itm(c: vec3f) -> vec3f { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4);
   let pn = pc.xy / pc.w;
   let puv = vec2f(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
   var blend = U.blend;
+  var huv = puv;
   if (pc.w <= 0.0 || puv.x < 0.0 || puv.x > 1.0 || puv.y < 0.0 || puv.y > 1.0) { blend = 1.0; }
-  let hs = textureSampleLevel(hist, samp, puv, 0.0);
+  if (moving) { huv = uv; blend = max(blend, 0.45); }
+  let hs = textureSampleLevel(hist, samp, huv, 0.0);
   let h = clamp(tm(hs.rgb), mn, mx);
   let aoAcc = select(mix(hs.a, ao, 0.07), ao, blend >= 1.0);
   return vec4f(itm(mix(h, c, blend)), aoAcc);
