@@ -6,6 +6,10 @@ const hud = $("hud"), msg = $("msg"), canvas = $("c");
 const Q = new URLSearchParams(location.search);
 const fail = (t) => { msg.textContent = t; msg.style.display = "grid"; throw new Error(t); };
 const A = new URL(document.body.dataset.assets || "../assets/", location.href).href;
+// phones and tablets get touch controls, automatic fullscreen and landscape; desktops are left alone
+const MOBILE = Q.has("mobile") ? Q.get("mobile") !== "0"
+  : (navigator.maxTouchPoints > 0 && (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (matchMedia("(pointer: coarse)").matches && !matchMedia("(any-pointer: fine)").matches)));
+if (MOBILE) document.body.classList.add("mobile");
 
 async function main() {
   if (!navigator.gpu) fail("このブラウザは WebGPU に対応していません。Chrome / Edge の最新版で開いてください。");
@@ -82,11 +86,11 @@ async function main() {
   const hasInst = L.count > 0;
   // dynamic objects: matrix slots follow the core (0 police body, 1-4 wheels, 5 engine body, 6-11 wheels, 12-21 character)
   const DYN_BASE = [0, 5];
-  const vehicles = VEH.map((n, i) => ({ name: n, info: vehData[i * 3], vb: mkBuf(vehData[i * 3 + 1], GPUBufferUsage.VERTEX), ib: mkBuf(vehData[i * 3 + 2], GPUBufferUsage.INDEX), base: DYN_BASE[i] }));
+  const vehicles = VEH.map((n, i) => ({ name: n, info: vehData[i * 3], vb: mkBuf(vehData[i * 3 + 1], GPUBufferUsage.VERTEX), ib: mkBuf(vehData[i * 3 + 2], GPUBufferUsage.INDEX), base: DYN_BASE[i], door: 22 + i * 2 }));
   const chr = { info: charJ, vb: mkBuf(charV, GPUBufferUsage.VERTEX), ib: mkBuf(charI, GPUBufferUsage.INDEX), base: 12 };
 
   // ---------------------------------------------------------------- pipelines
-  const SHADOW = Math.min(4096, device.limits.maxTextureDimension2D);
+  const SHADOW = Math.min(MOBILE ? 2048 : 4096, device.limits.maxTextureDimension2D);
   const shadowTex = device.createTexture({ size: [SHADOW, SHADOW], format: "depth32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
   const shadowView = shadowTex.createView();
   const FRAME_FLOATS = 84;
@@ -159,7 +163,7 @@ async function main() {
   const postUBO = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // ---------------------------------------------------------------- render targets (dynamic resolution)
-  let scale = Number(Q.get("scale") || 0.66), autoScale = !Q.has("scale");
+  let scale = Number(Q.get("scale") || (MOBILE ? 0.55 : 0.66)), autoScale = !Q.has("scale");
   let hdrTex, hdrView, depthTex, depthView, bgPost, RW = 0, RH = 0;
   function resize() {
     const dpr = Math.min(devicePixelRatio || 1, 1.5);
@@ -204,6 +208,65 @@ async function main() {
   addEventListener("mouseup", () => { dragging = false; });
   addEventListener("mousemove", (e) => { if (document.pointerLockElement === canvas || dragging) { lookX += e.movementX; lookY += e.movementY; } });
   document.addEventListener("pointerlockchange", () => { $("help").style.opacity = document.pointerLockElement === canvas ? 0.25 : 1; });
+
+  // ---------------------------------------------------------------- touch controls (mobile only)
+  const touch = { mx: 0, my: 0, run: false, brake: false };
+  if (MOBILE) {
+    const rootEl = $("root"), stick = $("stick"), knob = $("knob");
+    // when the page is turned on its side by CSS (portrait phone without orientation lock) screen deltas turn with it
+    const rotated = () => document.body.classList.contains("rotated");
+    const toLocal = (dx, dy) => (rotated() ? [dy, -dx] : [dx, dy]);
+    const updateRotation = () => document.body.classList.toggle("rotated", innerHeight > innerWidth);
+    addEventListener("resize", updateRotation); addEventListener("orientationchange", updateRotation); updateRotation();
+    const goFullscreen = async () => {
+      try { if (!document.fullscreenElement) await (document.documentElement.requestFullscreen?.({ navigationUI: "hide" }) ?? document.documentElement.webkitRequestFullscreen?.()); } catch {}
+      try { await screen.orientation?.lock?.("landscape"); } catch {}
+      updateRotation();
+    };
+    const fullBtn = $("bFull");
+    const syncFull = () => { fullBtn.style.display = document.fullscreenElement || !document.documentElement.requestFullscreen ? "none" : "grid"; };
+    document.addEventListener("fullscreenchange", syncFull);
+    $("start").addEventListener("pointerup", async () => { $("start").style.display = "none"; await goFullscreen(); syncFull(); });
+    fullBtn.addEventListener("pointerup", goFullscreen);
+    // joystick
+    let stickId = null;
+    const stickMove = (e) => {
+      const r = stick.getBoundingClientRect();
+      let [dx, dy] = toLocal(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+      const R = 50, l = Math.hypot(dx, dy);
+      if (l > R) { dx *= R / l; dy *= R / l; }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      const dead = (v) => (Math.abs(v) < 0.14 ? 0 : v);
+      touch.mx = dead(dx / R); touch.my = dead(-dy / R);
+    };
+    stick.addEventListener("pointerdown", (e) => { stickId = e.pointerId; stick.setPointerCapture(e.pointerId); stickMove(e); e.preventDefault(); });
+    stick.addEventListener("pointermove", (e) => { if (e.pointerId === stickId) stickMove(e); });
+    const stickEnd = (e) => { if (e.pointerId === stickId) { stickId = null; touch.mx = touch.my = 0; knob.style.transform = ""; } };
+    stick.addEventListener("pointerup", stickEnd); stick.addEventListener("pointercancel", stickEnd);
+    // look: drag anywhere else on the screen
+    const looks = new Map();
+    canvas.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") { looks.set(e.pointerId, [e.clientX, e.clientY]); canvas.setPointerCapture(e.pointerId); } });
+    canvas.addEventListener("pointermove", (e) => {
+      const p = looks.get(e.pointerId); if (!p) return;
+      const [dx, dy] = toLocal(e.clientX - p[0], e.clientY - p[1]);
+      lookX += dx * 2.0; lookY += dy * 2.0; looks.set(e.pointerId, [e.clientX, e.clientY]);
+    });
+    const lookEnd = (e) => looks.delete(e.pointerId);
+    canvas.addEventListener("pointerup", lookEnd); canvas.addEventListener("pointercancel", lookEnd);
+    // buttons
+    const tap = (id, fn) => $(id).addEventListener("pointerdown", (e) => { e.preventDefault(); fn(); });
+    const hold = (id, key) => {
+      const el = $(id);
+      el.addEventListener("pointerdown", (e) => { e.preventDefault(); el.setPointerCapture(e.pointerId); touch[key] = true; el.classList.add("on"); });
+      const up = () => { touch[key] = false; el.classList.remove("on"); };
+      el.addEventListener("pointerup", up); el.addEventListener("pointercancel", up);
+    };
+    tap("bUse", () => { once.use = true; }); tap("bBeacon", () => { once.beacon = true; }); tap("bLeft", () => { once.left = true; });
+    tap("bRight", () => { once.right = true; }); tap("bView", () => { once.view = true; });
+    hold("bBrake", "brake"); hold("bRun", "run");
+    rootEl.addEventListener("contextmenu", (e) => e.preventDefault());
+    document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  }
 
   if (Q.has("pos")) { const p = Q.get("pos").split(",").map(Number); wasm.teleport(p[0], p[1], p[2] || 0, p[3] ?? 0, p[4] ?? 0, Q.get("fly") === "1" ? 1 : 0); }
   if (Q.has("hour")) wasm.set_hour(Number(Q.get("hour")));
@@ -257,11 +320,12 @@ async function main() {
     resize();
     const inp = new Float32Array(mem(), wasm.input_ptr(), 24);
     const k = (c) => (keys.has(c) ? 1 : 0);
-    inp[0] = k("KeyD") - k("KeyA"); inp[1] = k("KeyW") - k("KeyS");
+    const cl = (v) => Math.max(-1, Math.min(1, v));
+    inp[0] = cl(k("KeyD") - k("KeyA") + touch.mx); inp[1] = cl(k("KeyW") - k("KeyS") + touch.my);
     inp[2] += lookX * 0.0022; inp[3] += lookY * 0.0022; lookX = lookY = 0;
     inp[2] += (k("ArrowRight") - k("ArrowLeft")) * dt * 1.6; inp[3] += (k("ArrowDown") - k("ArrowUp")) * dt * 1.2;
-    inp[4] = k("ShiftLeft") | k("ShiftRight"); inp[5] = RW / RH; inp[6] = timeSpeed;
-    inp[8] = k("KeyE") - k("KeyQ"); inp[9] = 1.05; inp[10] = lodBias; inp[12] = k("Space");
+    inp[4] = k("ShiftLeft") | k("ShiftRight") | (touch.run ? 1 : 0); inp[5] = RW / RH; inp[6] = timeSpeed;
+    inp[8] = k("KeyE") - k("KeyQ"); inp[9] = 1.05; inp[10] = lodBias; inp[12] = k("Space") | (touch.brake ? 1 : 0);
     if (once.fly) inp[7] = 1; if (once.use) inp[11] = 1; if (once.beacon) inp[13] = 1;
     if (once.left) inp[14] = 1; if (once.right) inp[15] = 1; if (once.view) inp[16] = 1;
     for (const key in once) once[key] = false;
@@ -302,6 +366,7 @@ async function main() {
       p.setVertexBuffer(0, v.vb); p.setIndexBuffer(v.ib, "uint32");
       drawDyn(p, v, v.info.parts.body, v.base);
       v.info.wheels.forEach((_, i) => drawDyn(p, v, v.info.parts.wheel, v.base + 1 + i));
+      ["door_r", "door_l"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
     if (f[92] < 0.5) {
       p.setVertexBuffer(0, chr.vb); p.setIndexBuffer(chr.ib, "uint32");
@@ -317,6 +382,7 @@ async function main() {
     for (const v of vehicles) if (v.info.parts.glass) {
       p.setVertexBuffer(0, v.vb); p.setIndexBuffer(v.ib, "uint32");
       drawDyn(p, v, v.info.parts.glass, v.base);
+      ["door_r_glass", "door_l_glass"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
     p.end();
     device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.9 * (1 - f[55]), f[51]]));
@@ -325,6 +391,14 @@ async function main() {
     device.queue.submit([enc.finish()]);
 
     const NAMES = ["", "パトカー", "消防車"];
+    if (MOBILE) {
+      const driving = f[89] === 2;
+      document.body.classList.toggle("driving", driving);
+      const use = $("bUse");
+      use.textContent = f[90] === 3 ? "降りる" : f[90] > 0 ? "乗る" : driving ? "降りる" : "乗る";
+      use.style.opacity = f[90] > 0 ? 1 : 0.35;
+      $("bBeacon").classList.toggle("on", f[93] > 0.5);
+    }
     $("prompt").textContent = f[90] === 1 || f[90] === 2 ? `E  ${NAMES[f[90]]}に乗る` : f[90] === 3 ? "E  降りる" : "";
     acc += dt; frames++;
     if (acc >= 0.5) {

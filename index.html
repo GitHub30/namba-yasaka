@@ -2,27 +2,73 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Motomachi Open World</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.45 ui-monospace, Consolas, monospace; color: #e8eef5; }
-  #c { width: 100vw; height: 100vh; display: block; cursor: crosshair; }
-  #hud { position: fixed; left: 12px; top: 10px; white-space: pre; text-shadow: 0 1px 2px #000, 0 0 6px #000; pointer-events: none; }
-  #help { position: fixed; left: 12px; bottom: 10px; white-space: pre; text-shadow: 0 1px 2px #000, 0 0 6px #000; pointer-events: none; transition: opacity .4s; }
-  #msg { position: fixed; inset: 0; display: none; place-content: center; text-align: center; background: #0b0f14; font-size: 15px; padding: 24px; }
-  #msg { display: grid; }
-  #prompt { position: fixed; left: 0; right: 0; bottom: 18%; text-align: center; font-size: 16px; text-shadow: 0 1px 3px #000, 0 0 8px #000; pointer-events: none; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.45 ui-monospace, Consolas, monospace; color: #e8eef5;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; overscroll-behavior: none; touch-action: none; }
+  #root { position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; }
+  #c { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+  #hud { position: absolute; left: 12px; top: 10px; white-space: pre; text-shadow: 0 1px 2px #000, 0 0 6px #000; pointer-events: none; }
+  #help { position: absolute; left: 12px; bottom: 10px; white-space: pre; text-shadow: 0 1px 2px #000, 0 0 6px #000; pointer-events: none; transition: opacity .4s; }
+  #msg { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; background: #0b0f14; font-size: 15px; padding: 24px; }
+  #prompt { position: absolute; left: 0; right: 0; bottom: 18%; text-align: center; font-size: 16px; text-shadow: 0 1px 3px #000, 0 0 8px #000; pointer-events: none; }
+
+  /* ---- touch controls: phones and tablets only (body.mobile is set by main.js) ---- */
+  #touch, #start { display: none; }
+  body.mobile #help { display: none; }
+  body.mobile #hud { font-size: 10px; left: max(8px, env(safe-area-inset-left)); top: 6px; opacity: .75; }
+  body.mobile #prompt { display: none; }
+  body.mobile #touch { display: block; position: absolute; inset: 0; pointer-events: none; }
+  body.mobile #start { display: grid; position: absolute; inset: 0; place-content: center; text-align: center; background: rgba(6, 10, 16, .82); font-size: 18px; line-height: 1.9; z-index: 5; }
+  #start small { font-size: 12px; opacity: .7; }
+  #stick { position: absolute; left: max(22px, env(safe-area-inset-left)); bottom: 22px; width: 132px; height: 132px; border-radius: 50%;
+    background: rgba(255, 255, 255, .10); border: 2px solid rgba(255, 255, 255, .28); pointer-events: auto; }
+  #knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(255, 255, 255, .42); }
+  .tb { position: absolute; display: grid; place-content: center; width: 62px; height: 62px; border-radius: 50%; font: 600 13px/1.15 system-ui, sans-serif; text-align: center;
+    color: #fff; background: rgba(20, 28, 40, .50); border: 2px solid rgba(255, 255, 255, .34); pointer-events: auto; }
+  .tb.on, .tb:active { background: rgba(255, 255, 255, .36); }
+  .tb.big { width: 78px; height: 78px; font-size: 15px; }
+  .tb.red.on { background: rgba(230, 30, 30, .72); }
+  .tb.amber.on { background: rgba(240, 150, 10, .72); }
+  #bUse { right: max(22px, env(safe-area-inset-right)); bottom: 108px; }
+  #bBrake { right: max(110px, calc(env(safe-area-inset-right) + 88px)); bottom: 22px; }
+  #bRun { right: max(22px, env(safe-area-inset-right)); bottom: 22px; }
+  #bBeacon { right: max(22px, env(safe-area-inset-right)); top: 14px; }
+  #bLeft { right: max(178px, calc(env(safe-area-inset-right) + 156px)); top: 14px; }
+  #bRight { right: max(100px, calc(env(safe-area-inset-right) + 78px)); top: 14px; }
+  #bView { right: max(256px, calc(env(safe-area-inset-right) + 234px)); top: 14px; }
+  #bFull { left: 50%; margin-left: -31px; top: 14px; display: none; }
+  body.driving .walk-only, body:not(.driving) .drive-only { display: none; }
+  /* a phone held upright that refuses the orientation lock (iOS): turn the whole game on its side */
+  body.mobile.rotated #root { width: 100vh; width: 100dvh; height: 100vw; transform-origin: 0 0; transform: translateX(100vw) rotate(90deg); }
 </style>
 </head>
 <body data-assets="assets/">
-<canvas id="c"></canvas>
-<div id="hud"></div>
-<div id="help">クリック（またはドラッグ）で視点操作   WASD 移動   Shift 走る   V 一人称/三人称
+<div id="root">
+  <canvas id="c"></canvas>
+  <div id="hud"></div>
+  <div id="help">クリック（またはドラッグ）で視点操作   WASD 移動   Shift 走る   V 一人称/三人称
 E 車の乗り降り   車内: W/S アクセル・後退  A/D ハンドル  Space ブレーキ
 L 赤色灯   Z/C 左右のウインカー（曲がるときは自動で点滅）
 F 飛行カメラ (Q/E 上下)   T 時間を進める/止める   [ ] 時刻 ±1h   - = 解像度   H 表示切替</div>
-<div id="prompt"></div>
-<div id="msg">読み込み中…</div>
+  <div id="prompt"></div>
+  <div id="touch">
+    <div id="stick"><div id="knob"></div></div>
+    <div class="tb big" id="bUse">乗る</div>
+    <div class="tb drive-only" id="bBrake">ブレーキ</div>
+    <div class="tb walk-only" id="bRun">走る</div>
+    <div class="tb red drive-only" id="bBeacon">赤色灯</div>
+    <div class="tb amber drive-only" id="bLeft">◀</div>
+    <div class="tb amber drive-only" id="bRight">▶</div>
+    <div class="tb" id="bView">視点</div>
+    <div class="tb" id="bFull">全画面</div>
+  </div>
+  <div id="msg">読み込み中…</div>
+  <div id="start"><div>画面をタップして開始<br><small>全画面・横向きに切り替わります</small></div></div>
+</div>
 <script type="module" src="main.js"></script>
 </body>
 </html>
