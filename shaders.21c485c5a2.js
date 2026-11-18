@@ -275,7 +275,9 @@ fn detail(kind: u32, p: vec3f, n: vec3f, dist: f32, px: f32) -> Detail {
     d.albedo *= 1.0 + stone + binder;
     // older, greyer surface in blotches; dark tar patches with soft edges; a few oil drips
     let age = vnoise(vec3f(uv * 0.9, 3.0));
-    d.albedo *= mix(0.86, 1.12, smoothstep(0.30, 0.75, age));
+    // tone and unevenness measured on the reference photographs: neutral mid grey, about +-20 % in metre-sized blotches
+    let age2 = vnoise(vec3f(uv * 0.21, 5.0));
+    d.albedo *= mix(0.74, 1.08, smoothstep(0.25, 0.80, age)) * mix(0.84, 1.10, age2);
     let patchK = smoothstep(0.60, 0.66, vnoise(vec3f(uv * 0.33, 7.0)));
     d.albedo *= mix(1.0, 0.72, patchK);
     let oil = smoothstep(0.80, 0.90, vnoise(vec3f(uv * 2.6, 11.0))) * lod(3.0, px);
@@ -354,6 +356,18 @@ fn detail(kind: u32, p: vec3f, n: vec3f, dist: f32, px: f32) -> Detail {
   } else {
     let g = vnoise(vec3f(uv * 40.0, 3.0));
     d.albedo *= 1.0 + (g - 0.5) * 0.08 * fade;
+  }
+  // weathering of walls, as seen on the photographs: rain streaks running down, and a dirty splash band above the ground
+  let wall = 1.0 - abs(n.z);
+  if (wall > 0.6 && ((kind >= 2u && kind <= 6u) || kind == 27u)) {
+    let along = dot(p.xy, vec2f(-n.y, n.x));
+    let s1 = vnoise(vec3f(along * 3.2, p.z * 0.22, 9.0));
+    let s2 = vnoise(vec3f(along * 14.0, p.z * 0.7, 4.0));
+    let streak = smoothstep(0.50, 0.78, s1 * 0.65 + s2 * 0.35) * lod(14.0, px);
+    d.albedo *= mix(vec3f(1.0), vec3f(0.70, 0.69, 0.66), streak);
+    let splash = (1.0 - smoothstep(0.02, 0.60, p.z)) * (0.45 + 0.55 * vnoise(vec3f(along * 2.5, 1.0, 6.0)));
+    d.albedo *= mix(vec3f(1.0), vec3f(0.60, 0.58, 0.54), splash * 0.7);
+    d.rough += streak * 0.06;
   }
   return d;
 }
@@ -441,7 +455,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let dist = distance(F.camPos, i.wpos);
   var albedo = srgbToLinear(i.col.rgb);
   var rough = i.col.a;
-  let metal = f32(i.mat.y) / 255.0;
+  let metal = select(f32(i.mat.y) / 255.0, 0.0, kind == 27u);
   let emis = f32(i.mat.z) / 255.0 * 8.0;
   let alpha = f32(i.mat.w) / 255.0;
 
@@ -449,6 +463,33 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let d = detail(kind, i.wpos, N, dist, px);
   albedo *= d.albedo;
   rough = clamp(rough + d.rough, 0.045, 1.0);
+  // backdrop buildings: window grid drawn on the walls (mat.y carries a per-building seed)
+  var cityLit = 0.0;
+  if (kind == 27u && abs(N.z) < 0.5) {
+    let bid = f32(i.mat.y);
+    let along = dot(i.wpos.xy, vec2f(-N.y, N.x));
+    let pitch = 2.2 + fract(bid * 0.37) * 1.6;
+    let fl = 3.2;
+    let cu = along / pitch; let cv = (i.wpos.z - 0.9) / fl;
+    let fu = fract(cu); let fv = fract(cv);
+    let ww = 0.50 + 0.34 * fract(bid * 0.19);
+    let eu = px / pitch * 1.2; let ev = px / fl * 1.2;
+    var win = smoothstep(ww * 0.5 + eu, ww * 0.5 - eu, abs(fu - 0.5)) * smoothstep(0.24 - ev, 0.24 + ev, fv) * smoothstep(0.80 + ev, 0.80 - ev, fv);
+    let f = lod(0.30, px);
+    win = mix(ww * 0.56, win, f) * step(0.0, cv);
+    // aluminium frame and a centre mullion around dark, smooth glass; some rooms have their curtains drawn
+    let du = (ww * 0.5 - abs(fu - 0.5)) * pitch; let dv2 = min(fv - 0.24, 0.80 - fv) * fl;
+    let inner = smoothstep(0.05, 0.05 + px, min(du, dv2)) * smoothstep(0.02, 0.02 + px, abs(fu - 0.5) * pitch);
+    let glassK = win * mix(1.0, inner, f);
+    let h3 = hash21(vec2f(floor(cu) + 3.0, floor(cv) + bid));
+    let curt = step(0.68, h3) * f;
+    albedo = mix(albedo, vec3f(0.42, 0.43, 0.44), (win - glassK));
+    albedo = mix(albedo, mix(vec3f(0.035, 0.045, 0.055), vec3f(0.46, 0.44, 0.39), curt * 0.8), glassK);
+    rough = mix(rough, mix(0.07, 0.35, curt), glassK);
+    win = glassK;
+    let hc = hash21(vec2f(floor(cu), floor(cv)) + bid * 7.3);
+    cityLit = win * mix(0.26, step(0.74, hc), f) * (0.6 + 0.4 * hash21(vec2f(floor(cv), floor(cu)) + bid));
+  }
   // bump: perturb in the tangent frame of the dominant axis
   let a = abs(N);
   var T = vec3f(1.0, 0.0, 0.0);
@@ -529,6 +570,7 @@ fn shade(i: VOut, front: bool) -> vec4f {
   // emission: lamps and lit interiors come up at dusk
   let night = 1.0 - F.day;
   col += albedo * emis * mix(0.35, 1.5, night);
+  col += vec3f(1.0, 0.80, 0.52) * cityLit * smoothstep(0.35, 0.85, night) * 0.75;
 
   // traffic signals (lenses tagged at export): 24 red, 25 yellow, 26 green. Heads facing north / south serve one
   // direction of traffic, heads facing east / west the other; 44 s cycle with all-red gaps. Pedestrian heads face the
