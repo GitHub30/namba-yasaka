@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST } from "./shaders.js";
+import { COMMON, WORLD, SKY, POST } from "./shaders.284c8be584.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -7,6 +7,9 @@ const Q = new URLSearchParams(location.search);
 const fail = (t) => { msg.textContent = t; msg.style.display = "grid"; throw new Error(t); };
 const A = new URL(document.body.dataset.assets || "../assets/", location.href).href;
 // phones and tablets get touch controls, automatic fullscreen and landscape; desktops are left alone
+const BUILD = document.body.dataset.build || "dev";
+addEventListener("error", (e) => { const h = document.getElementById("err"); if (h) h.textContent = `エラー: ${e.message} (${(e.filename || "").split("/").pop()}:${e.lineno})`; });
+addEventListener("unhandledrejection", (e) => { const h = document.getElementById("err"); if (h && !/pointer lock/i.test(String(e.reason))) h.textContent = `エラー: ${e.reason?.message || e.reason}`; });
 const MOBILE = Q.has("mobile") ? Q.get("mobile") !== "0"
   : (navigator.maxTouchPoints > 0 && (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (matchMedia("(pointer: coarse)").matches && !matchMedia("(any-pointer: fine)").matches)));
 if (MOBILE) document.body.classList.add("mobile");
@@ -26,7 +29,7 @@ async function main() {
   const stage = (t) => { window.__stage = t; msg.textContent = t; };
   msg.style.display = "grid"; stage("ワールドを読み込み中…");
   // large files may be split into parts for hosting (see tools/make_dist.py): assets/manifest.json lists them
-  const manifest = await fetch(A + "manifest.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+  const manifest = await fetch(A + "manifest.json?v=" + BUILD, { cache: "no-store" }).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
   const getBuf = async (url) => {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
@@ -36,17 +39,18 @@ async function main() {
   };
   const bin = async (name) => {
     const parts = manifest[name];
-    if (!parts) return getBuf(A + name);
-    const bufs = await Promise.all(parts.map((p) => getBuf(A + p)));
+    const ver = "?v=" + ((manifest.__versions || {})[name] || BUILD);
+    if (!parts) return getBuf(A + name + ver);
+    const bufs = await Promise.all(parts.map((p) => getBuf(A + p + ver)));
     const out = new Uint8Array(bufs.reduce((n, b) => n + b.byteLength, 0));
     let o = 0; for (const b of bufs) { out.set(new Uint8Array(b), o); o += b.byteLength; }
     return out.buffer;
   };
-  const json = (name) => fetch(A + name).then((r) => { if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`); return r.json(); });
+  const json = (name) => fetch(A + name + "?v=" + ((manifest.__versions || {})[name] || BUILD)).then((r) => { if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`); return r.json(); });
   const VEH = ["police", "firetruck"];
   const [world, vtxBuf, idxBuf, instBuf, colBuf, wasmBuf, charJ, charV, charI, ...vehData] = await Promise.all([
     json("world.json"), bin("world_vtx.bin"), bin("world_idx.bin"), bin("inst.bin"), bin("collide.bin"),
-    fetch(new URL("core.wasm", import.meta.url)).then((r) => r.arrayBuffer()),
+    fetch(new URL("core.wasm?v=" + BUILD, import.meta.url)).then((r) => r.arrayBuffer()),
     json("char.json"), bin("char_vtx.bin"), bin("char_idx.bin"),
     ...VEH.flatMap((n) => [json(n + ".json"), bin(n + "_vtx.bin"), bin(n + "_idx.bin")]),
   ]);
@@ -204,7 +208,7 @@ async function main() {
   addEventListener("blur", () => keys.clear());
   // mouse look: pointer lock where the browser allows it, otherwise hold the mouse button and drag
   let dragging = false;
-  canvas.addEventListener("mousedown", () => { dragging = true; try { const r = canvas.requestPointerLock?.(); r?.catch?.(() => {}); } catch {} });
+  canvas.addEventListener("mousedown", () => { if (MOBILE) return; dragging = true; try { const r = canvas.requestPointerLock?.(); r?.catch?.(() => {}); } catch {} });
   addEventListener("mouseup", () => { dragging = false; });
   addEventListener("mousemove", (e) => { if (document.pointerLockElement === canvas || dragging) { lookX += e.movementX; lookY += e.movementY; } });
   document.addEventListener("pointerlockchange", () => { $("help").style.opacity = document.pointerLockElement === canvas ? 0.25 : 1; });
@@ -245,42 +249,56 @@ async function main() {
       const dead = (v) => (Math.abs(v) < 0.12 ? 0 : v);
       touch.mx = dead(dx / SR); touch.my = dead(-dy / SR);
     };
-    rootEl.addEventListener("touchstart", (e) => {
+    const dbg = { touches: 0, pointers: 0, last: "-" };
+    const fingerDown = (id, x, y, target) => {
+      if (target && target.closest && target.closest(".tb, #start")) return false;
       updateRotation();
-      for (const t of e.changedTouches) {
-        if (onControl(t)) continue;
-        const [lx, ly] = toScreenLocal(t.clientX, t.clientY);
-        if (moveId === null && lx < rootW() * 0.5) {
-          moveId = t.identifier; moveFrom = [t.clientX, t.clientY];
-          stick.style.left = `${lx - 66}px`; stick.style.top = `${ly - 66}px`; stick.style.display = "block";
-          stickSet(0, 0);
-        } else {
-          looks.set(t.identifier, [t.clientX, t.clientY]);
-        }
+      const [lx, ly] = toScreenLocal(x, y);
+      if (moveId === null && lx < rootW() * 0.5) {
+        moveId = id; moveFrom = [x, y];
+        stick.style.left = `${lx - 66}px`; stick.style.top = `${ly - 66}px`; stick.style.display = "block";
+        stickSet(0, 0); dbg.last = "move";
+      } else {
+        looks.set(id, [x, y]); dbg.last = "look";
       }
-      if (![...e.changedTouches].some(onControl)) e.preventDefault();
-    }, { passive: false });
-    rootEl.addEventListener("touchmove", (e) => {
-      for (const t of e.changedTouches) {
-        if (t.identifier === moveId) {
-          const [dx, dy] = toLocal(t.clientX - moveFrom[0], t.clientY - moveFrom[1]);
-          stickSet(dx, dy);
-        } else if (looks.has(t.identifier)) {
-          const p = looks.get(t.identifier);
-          const [dx, dy] = toLocal(t.clientX - p[0], t.clientY - p[1]);
-          lookX += dx * 2.2; lookY += dy * 2.2;
-          looks.set(t.identifier, [t.clientX, t.clientY]);
-        }
-      }
-      e.preventDefault();
-    }, { passive: false });
-    const touchEnd = (e) => {
-      for (const t of e.changedTouches) {
-        if (t.identifier === moveId) { moveId = null; touch.mx = touch.my = 0; stick.style.display = "none"; knob.style.transform = ""; }
-        looks.delete(t.identifier);
+      return true;
+    };
+    const fingerMove = (id, x, y) => {
+      if (id === moveId) {
+        const [dx, dy] = toLocal(x - moveFrom[0], y - moveFrom[1]);
+        stickSet(dx, dy);
+      } else if (looks.has(id)) {
+        const q = looks.get(id);
+        const [dx, dy] = toLocal(x - q[0], y - q[1]);
+        lookX += dx * 2.2; lookY += dy * 2.2;
+        looks.set(id, [x, y]);
       }
     };
-    rootEl.addEventListener("touchend", touchEnd); rootEl.addEventListener("touchcancel", touchEnd);
+    const fingerUp = (id) => {
+      if (id === moveId) { moveId = null; touch.mx = touch.my = 0; stick.style.display = "none"; knob.style.transform = ""; }
+      looks.delete(id);
+    };
+    // Touch events are the primary source. Pointer events are a fallback for browsers that deliver no touch events,
+    // and are ignored as soon as one touch event has been seen (so nothing is counted twice).
+    let sawTouch = false;
+    const opt = { passive: false, capture: true };
+    document.addEventListener("touchstart", (e) => {
+      sawTouch = true; dbg.touches++;
+      let ours = false;
+      for (const t of e.changedTouches) ours = fingerDown(t.identifier, t.clientX, t.clientY, t.target) || ours;
+      if (ours && e.cancelable) e.preventDefault();
+    }, opt);
+    document.addEventListener("touchmove", (e) => {
+      for (const t of e.changedTouches) fingerMove(t.identifier, t.clientX, t.clientY);
+      if (e.cancelable) e.preventDefault();
+    }, opt);
+    const touchEnd = (e) => { for (const t of e.changedTouches) fingerUp(t.identifier); };
+    document.addEventListener("touchend", touchEnd, opt); document.addEventListener("touchcancel", touchEnd, opt);
+    document.addEventListener("pointerdown", (e) => { if (!sawTouch && e.pointerType !== "mouse") { dbg.pointers++; fingerDown(1000 + e.pointerId, e.clientX, e.clientY, e.target); } }, opt);
+    document.addEventListener("pointermove", (e) => { if (!sawTouch && e.pointerType !== "mouse") fingerMove(1000 + e.pointerId, e.clientX, e.clientY); }, opt);
+    const pEnd = (e) => { if (!sawTouch && e.pointerType !== "mouse") fingerUp(1000 + e.pointerId); };
+    document.addEventListener("pointerup", pEnd, opt); document.addEventListener("pointercancel", pEnd, opt);
+    window.__touchDebug = () => `touch ${dbg.touches} ptr ${dbg.pointers} ${dbg.last} stick ${touch.mx.toFixed(2)},${touch.my.toFixed(2)}${rotated() ? " rot" : ""}`;
     window.__touch = touch;
     // buttons
     const tap = (id, fn) => $(id).addEventListener("pointerdown", (e) => { e.preventDefault(); fn(); });
@@ -439,6 +457,7 @@ async function main() {
       const hh = Math.floor(hour), mm = Math.floor((hour - hh) * 60);
       hud.textContent = `${fps.toFixed(1)} fps  ${ms.toFixed(1)} ms   ${RW}x${RH} (x${scale.toFixed(2)})\n` +
         `${(tris / 1e6).toFixed(2)}M tris  ${draws} draws   ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}${flying ? "  [FLY]" : ""}\n` +
+        (MOBILE ? `${BUILD}  ${window.__touchDebug?.() ?? ""}\n` : "") +
         `pos ${f[68].toFixed(1)}, ${f[69].toFixed(1)}` + (f[89] === 2 ? `   ${NAMES[f[91]]}  ${Math.abs(f[88] * 3.6).toFixed(0)} km/h${f[93] > 0.5 ? "  赤色灯 ON" : ""}` : "");
       Object.assign(stats, { fps, ms, tris, draws, scale, w: RW, h: RH, ready: true, hour, x: f[68], y: f[69], mode: f[89], vehicle: f[91], speed: f[88] });
     }

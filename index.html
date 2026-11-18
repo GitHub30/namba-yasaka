@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta http-equiv="Cache-Control" content="no-cache">
 <title>Motomachi Open World</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px/1.45 ui-monospace, Consolas, monospace; color: #e8eef5;
@@ -47,7 +48,7 @@
   body.mobile.rotated #root { width: 100vh; width: 100dvh; height: 100vw; transform-origin: 0 0; transform: translateX(100vw) rotate(90deg); }
 </style>
 </head>
-<body data-assets="assets/">
+<body data-assets="assets/" data-build="1118-1039-5f54">
 <div id="root">
   <canvas id="c"></canvas>
   <div id="hud"></div>
@@ -56,6 +57,7 @@ E 車の乗り降り   車内: W/S アクセル・後退  A/D ハンドル  Spac
 L 赤色灯   Z/C 左右のウインカー（曲がるときは自動で点滅）
 F 飛行カメラ (Q/E 上下)   T 時間を進める/止める   [ ] 時刻 ±1h   - = 解像度   H 表示切替</div>
   <div id="prompt"></div>
+  <div id="err" style="position:absolute;left:8px;right:8px;top:40%;text-align:center;color:#ffb0a0;text-shadow:0 1px 3px #000;pointer-events:none"></div>
   <div id="touch">
     <div id="stick"><div id="knob"></div></div>
     <div class="tb big" id="bUse">乗る</div>
@@ -70,6 +72,6 @@ F 飛行カメラ (Q/E 上下)   T 時間を進める/止める   [ ] 時刻 ±1
   <div id="msg">読み込み中…</div>
   <div id="start"><div>画面をタップして開始<br><small>全画面・横向きに切り替わります</small></div></div>
 </div>
-<script type="module" src="main.js"></script>
+<script type="module" src="main.5f54de23af.js"></script>
 </body>
 </html>
