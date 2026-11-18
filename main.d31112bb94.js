@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST } from "./shaders.714fb6ca21.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.632ae7e564.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -115,7 +115,8 @@ async function main() {
   const modWorld = device.createShaderModule({ code: COMMON + WORLD });
   const modSky = device.createShaderModule({ code: COMMON + SKY });
   const modPost = device.createShaderModule({ code: POST });
-  for (const [n, m] of [["world", modWorld], ["sky", modSky], ["post", modPost]]) {
+  const modTaa = device.createShaderModule({ code: TAA });
+  for (const [n, m] of [["world", modWorld], ["sky", modSky], ["post", modPost], ["taa", modTaa]]) {
     const info = await m.getCompilationInfo();
     for (const e of info.messages) if (e.type === "error") fail(`シェーダー ${n} のエラー: ${e.lineNum}:${e.linePos} ${e.message}`);
   }
@@ -160,11 +161,23 @@ async function main() {
     primitive: { topology: "triangle-list" }, depthStencil: { format: DEPTH, depthWriteEnabled: false, depthCompare: "less-equal" } });
   const lPost = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: {} }] });
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+    { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "depth" } }] });
   const pPost = device.createRenderPipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [lPost] }),
     vertex: { module: modPost, entryPoint: "vs" }, fragment: { module: modPost, entryPoint: "fs", targets: [{ format: fmt }] } });
   const linSamp = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-  const postUBO = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const lTaa = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} }, { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "depth" } },
+    { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: {} }] });
+  const pTaa = device.createRenderPipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [lTaa] }),
+    vertex: { module: modTaa, entryPoint: "vs" }, fragment: { module: modTaa, entryPoint: "fs", targets: [{ format: "rgba16float" }] } });
+  const taaUBO = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const taaData = new Float32Array(40);
+  const prevVP = new Float32Array(16);
+  const HALTON = Array.from({ length: 8 }, (_, i) => { const h = (n, b) => { let f = 1, r = 0; while (n > 0) { f /= b; r += f * (n % b); n = Math.floor(n / b); } return r; }; return [h(i + 1, 2) - 0.5, h(i + 1, 3) - 0.5]; });
+  let histTex = [], histView = [], bgTaa = [], bgPostHist = [], histValid = false, frameNo = 0;
+  const postUBO = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // ---------------------------------------------------------------- render targets (dynamic resolution)
   let scale = Number(Q.get("scale") || (MOBILE ? 0.55 : 0.66)), autoScale = !Q.has("scale");
@@ -178,13 +191,23 @@ async function main() {
     RW = w; RH = h; hdrTex?.destroy(); depthTex?.destroy();
     hdrTex = device.createTexture({ size: [w, h], format: HDR, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     hdrView = hdrTex.createView();
-    depthTex = device.createTexture({ size: [w, h], format: DEPTH, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    depthTex = device.createTexture({ size: [w, h], format: DEPTH, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     depthView = depthTex.createView();
-    bgPost = device.createBindGroup({ layout: lPost, entries: [{ binding: 0, resource: hdrView }, { binding: 1, resource: linSamp }, { binding: 2, resource: { buffer: postUBO } }] });
+    const postGroup = (view) => device.createBindGroup({ layout: lPost, entries: [{ binding: 0, resource: view }, { binding: 1, resource: linSamp }, { binding: 2, resource: { buffer: postUBO } }, { binding: 3, resource: depthView }] });
+    bgPost = postGroup(hdrView);
+    histTex.forEach((t) => t.destroy());
+    histTex = [0, 1].map(() => device.createTexture({ size: [w, h], format: HDR, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }));
+    histView = histTex.map((t) => t.createView());
+    // bgTaa[i] reads history i and is used while writing history 1 - i
+    bgTaa = [0, 1].map((i) => device.createBindGroup({ layout: lTaa, entries: [{ binding: 0, resource: hdrView }, { binding: 1, resource: histView[i] },
+      { binding: 2, resource: linSamp }, { binding: 3, resource: depthView }, { binding: 4, resource: { buffer: taaUBO } }] }));
+    bgPostHist = histView.map(postGroup);
+    histValid = false;
   }
 
   // ---------------------------------------------------------------- input
   const keys = new Set();
+  const fx = { ssao: Q.get("ssao") !== "0", taa: Q.get("taa") !== "0" };
   const once = { use: false, fly: false, beacon: false, left: false, right: false, view: false };
   let lookX = 0, lookY = 0, timeSpeed = Number(Q.get("speed") || 0), lodBias = 1, flying = false, hour = 0;
   addEventListener("keydown", (e) => {
@@ -196,6 +219,8 @@ async function main() {
     if (e.code === "KeyZ") once.left = true;
     if (e.code === "KeyC") once.right = true;
     if (e.code === "KeyV") once.view = true;
+    if (e.code === "KeyO") fx.ssao = !fx.ssao;
+    if (e.code === "KeyP") { fx.taa = !fx.taa; histValid = false; }
     if (e.code === "KeyT") timeSpeed = timeSpeed ? 0 : 0.5;
     if (e.code === "BracketRight") wasm.set_hour(hour + 1);
     if (e.code === "BracketLeft") wasm.set_hour(hour - 1);
@@ -352,6 +377,7 @@ async function main() {
     const avg = t.reduce((a, b) => a + b, 0) / t.length;
     return { avg_ms: +avg.toFixed(2), median_ms: +t[t.length >> 1].toFixed(2), fps: +(1000 / avg).toFixed(1), tris, draws, w: RW, h: RH, scale };
   };
+  window.__fx = fx;
   window.__game = {
     teleport: (...a) => wasm.teleport(...a), hour: (h) => wasm.set_hour(h), setScale: (v) => { autoScale = false; scale = v; },
     placeVehicle: (i, x, y, yaw) => wasm.place_vehicle(i, x, y, yaw), press: (k) => { once[k] = true; },
@@ -376,10 +402,14 @@ async function main() {
     if (once.fly) inp[7] = 1; if (once.use) inp[11] = 1; if (once.beacon) inp[13] = 1;
     if (once.left) inp[14] = 1; if (once.right) inp[15] = 1; if (once.view) inp[16] = 1;
     for (const key in once) once[key] = false;
+    frameNo++;
+    const jit = fx.taa ? HALTON[frameNo % 8] : [0, 0];
+    const jx = (jit[0] * 2) / RW, jy = (jit[1] * 2) / RH;        // NDC units
+    inp[17] = jx; inp[18] = jy;
     wasm.update(dt);
-    const f = new Float32Array(mem(), wasm.frame_ptr(), 96);
+    const f = new Float32Array(mem(), wasm.frame_ptr(), 112);
     hour = f[63]; flying = f[67] > 0.5;
-    fu.set(f.subarray(0, 64)); fu[64] = RW; fu[65] = RH; fu[66] = 1 / SHADOW; fu[67] = 1;
+    fu.set(f.subarray(0, 64)); fu[64] = RW; fu[65] = RH; fu[66] = 1 / SHADOW; fu[67] = world.ao ? 1 : 0;
     fu.set(f.subarray(72, 88), 68);                    // car0, car1, beaconA, beaconB
     device.queue.writeBuffer(frameUBO, 0, fu);
     const dyn = new Float32Array(mem(), wasm.dyn_ptr(), N_DYN * 20);
@@ -396,7 +426,7 @@ async function main() {
     tris = 0; draws = 0;
     const p = enc.beginRenderPass({
       colorAttachments: [{ view: hdrView, loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 1] }],
-      depthStencilAttachment: { view: depthView, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "discard" } });
+      depthStencilAttachment: { view: depthView, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" } });
     p.setBindGroup(0, bgWorld);
     p.setPipeline(pOpaque); p.setVertexBuffer(0, VB); p.setIndexBuffer(IB, "uint32");
     for (const id of visO) { const c = chunks[id]; p.drawIndexed(c.count, 1, c.first, c.base, 0); tris += c.count / 3; draws++; }
@@ -432,9 +462,20 @@ async function main() {
       ["door_r_glass", "door_l_glass"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
     p.end();
-    device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.9 * (1 - f[55]), f[51]]));
+    device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.9 * (1 - f[55]), f[51], f[65], f[66], Math.tan(1.05 / 2), RW / RH, fx.ssao ? 0.85 : 0, fx.taa ? 1 : 0, 0, 0]));
+    let postBG = bgPost;
+    if (fx.taa) {
+      const w = frameNo & 1, r = 1 - w;                         // write history w, read history r
+      taaData.set(f.subarray(16, 32), 0); taaData.set(histValid ? prevVP : f.subarray(96, 112), 16);
+      taaData[32] = RW; taaData[33] = RH; taaData[34] = jx; taaData[35] = jy; taaData[36] = histValid ? 0.12 : 1.0;
+      device.queue.writeBuffer(taaUBO, 0, taaData);
+      const t = enc.beginRenderPass({ colorAttachments: [{ view: histView[w], loadOp: "clear", storeOp: "store" }] });
+      t.setPipeline(pTaa); t.setBindGroup(0, bgTaa[r]); t.draw(3); t.end();
+      postBG = bgPostHist[w]; histValid = true;
+    }
+    prevVP.set(f.subarray(96, 112));
     const q = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: "clear", storeOp: "store" }] });
-    q.setPipeline(pPost); q.setBindGroup(0, bgPost); q.draw(3); q.end();
+    q.setPipeline(pPost); q.setBindGroup(0, postBG); q.draw(3); q.end();
     device.queue.submit([enc.finish()]);
 
     const NAMES = ["", "パトカー", "消防車"];

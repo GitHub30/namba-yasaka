@@ -151,11 +151,13 @@ struct VOut {
   @location(4) fade: f32,
   @location(5) lpos: vec3f,                       // object-space position (dynamic objects)
   @location(6) @interpolate(flat) lights: vec4f,  // beacon, left signal, right signal, brake
+  @location(7) ao: f32,                           // baked ambient occlusion (1 = open sky)
 };
 
 @vertex fn vsWorld(v: VIn) -> VOut {
   var o: VOut;
   o.wpos = v.pos; o.nrm = octDecode(v.nrm); o.col = v.col; o.mat = v.mat; o.fade = 1.0;
+  o.ao = f32(v.mat.w) / 255.0;
   o.clip = F.viewProj * vec4f(v.pos, 1.0);
   return o;
 }
@@ -176,7 +178,7 @@ struct IIn { @location(4) r0: vec4f, @location(5) r1: vec4f, @location(6) r2: ve
   o.wpos = p;
   let n = octDecode(v.nrm);
   o.nrm = normalize(vec3f(dot(i.r0.xyz, n), dot(i.r1.xyz, n), dot(i.r2.xyz, n)));
-  o.col = v.col; o.mat = v.mat; o.fade = 1.0;
+  o.col = v.col; o.mat = v.mat; o.fade = 1.0; o.ao = 1.0;
   o.clip = F.viewProj * vec4f(p, 1.0);
   return o;
 }
@@ -188,7 +190,7 @@ struct Model { m: mat4x4f, lights: vec4f };
   let p = M.m * vec4f(v.pos, 1.0);
   let n = octDecode(v.nrm);
   o.wpos = p.xyz; o.nrm = normalize((M.m * vec4f(n, 0.0)).xyz); o.col = v.col; o.mat = v.mat; o.fade = 0.0;
-  o.lpos = v.pos; o.lights = M.lights;
+  o.lpos = v.pos; o.lights = M.lights; o.ao = 1.0;
   o.clip = F.viewProj * p;
   return o;
 }
@@ -400,9 +402,12 @@ fn shade(i: VOut, front: bool) -> vec4f {
   }
 
   // ambient: sky hemisphere diffuse + sky reflection, with a cheap geometric occlusion term
-  let hemiAO = mix(0.55, 1.0, smoothstep(-0.2, 0.9, N.z)) * d.ao;
-  let lowAO = mix(0.72, 1.0, smoothstep(0.0, 2.5, i.wpos.z + N.z * 2.0));
-  let amb = ambientSky(N) * hemiAO * lowAO * (1.0 - 0.55 * carOcc);
+  // baked occlusion where the world data has it (F.quality = 1), otherwise the old height heuristic
+  let bakedAO = select(1.0, mix(1.0, clamp(i.ao, 0.0, 1.0), F.quality), kind != 11u && i.fade > 0.5);
+  let hemiAO = mix(0.55, 1.0, smoothstep(-0.2, 0.9, N.z)) * d.ao * mix(0.38, 1.0, bakedAO);
+  let lowAO = mix(mix(0.72, 1.0, smoothstep(0.0, 2.5, i.wpos.z + N.z * 2.0)), 1.0, F.quality);
+  let bounce = vec3f(0.30, 0.27, 0.23) * F.day * max(F.sunDir.z, 0.0) * (1.0 - bakedAO) * 0.55;
+  let amb = (ambientSky(N) * hemiAO * lowAO + bounce) * (1.0 - 0.55 * carOcc);
   col += diff * amb;
   let R = reflect(-V, N);
   let env = skyBase(normalize(vec3f(R.xy, abs(R.z) * 0.9 + 0.05)));
@@ -502,8 +507,43 @@ struct SV { @builtin(position) clip: vec4f, @location(0) ndc: vec2f };
 export const POST = /* wgsl */`
 @group(0) @binding(0) var hdr: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-struct P { res: vec2f, exposure: f32, time: f32 };
+struct P { res: vec2f, exposure: f32, time: f32, proj: vec4f, fx: vec4f };   // proj: near, far, tan(fov/2), aspect; fx: ssao strength
 @group(0) @binding(2) var<uniform> U: P;
+@group(0) @binding(3) var depthTex: texture_depth_2d;
+
+fn viewPos(px: vec2i) -> vec3f {
+  let dims = vec2i(U.res);
+  let q = clamp(px, vec2i(0), dims - 1);
+  let d = textureLoad(depthTex, q, 0);
+  let z = U.proj.x * U.proj.y / (U.proj.y - d * (U.proj.y - U.proj.x));
+  let ndc = (vec2f(q) + 0.5) / U.res * 2.0 - 1.0;
+  return vec3f(ndc.x * U.proj.z * U.proj.w * z, -ndc.y * U.proj.z * z, z);
+}
+// Small-scale contact shadows: how much of the hemisphere above the surface is blocked by nearby depth samples.
+fn ssao(frag: vec2f) -> f32 {
+  let px = vec2i(frag);
+  let P0 = viewPos(px);
+  if (P0.z > U.proj.y * 0.6) { return 1.0; }
+  // normal from the nearer of the two neighbours on each axis (avoids bleeding across depth edges)
+  let l = viewPos(px - vec2i(1, 0)); let r = viewPos(px + vec2i(1, 0));
+  let u = viewPos(px - vec2i(0, 1)); let dn = viewPos(px + vec2i(0, 1));
+  let dx = select(r - P0, P0 - l, abs(l.z - P0.z) < abs(r.z - P0.z));
+  let dy = select(dn - P0, P0 - u, abs(u.z - P0.z) < abs(dn.z - P0.z));
+  let n = normalize(cross(dy, dx));
+  let radius = 0.55;                                     // metres
+  let rpx = clamp(radius / (P0.z * U.proj.z) * U.res.y * 0.5, 3.0, 48.0);
+  let rot = fract(52.9829189 * fract(dot(frag, vec2f(0.06711056, 0.00583715)))) * 6.2831853;
+  var occ = 0.0;
+  for (var k = 0; k < 6; k++) {
+    let a = rot + f32(k) * 2.39996;
+    let rr = rpx * sqrt((f32(k) + 0.5) / 6.0);
+    let Ps = viewPos(px + vec2i(vec2f(cos(a), sin(a)) * rr));
+    let v = Ps - P0;
+    let d2 = dot(v, v);
+    occ += max(dot(n, v) - 0.03 * P0.z - 0.01, 0.0) / (d2 + 0.004) * step(d2, radius * radius * 2.5);
+  }
+  return clamp(1.0 - occ * 0.36, 0.0, 1.0);
+}
 struct SV { @builtin(position) clip: vec4f, @location(0) uv: vec2f };
 @vertex fn vs(@builtin(vertex_index) vi: u32) -> SV {
   var o: SV;
@@ -528,11 +568,14 @@ fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
   let lmin = min(lc, min(min(ln, ls), min(le, lw))); let lmax = max(lc, max(max(ln, ls), max(le, lw)));
   var col = c;
   let range = lmax - lmin;
-  if (range > max(0.04, lmax * 0.12)) {
+  if (U.fx.y < 0.5 && range > max(0.04, lmax * 0.12)) {     // FXAA only when temporal AA is off
     let gx = abs(le - lw); let gy = abs(ln - ls);
     let blend = clamp(range / (lmax + 1e-4), 0.0, 1.0) * 0.5;
     let avg = select((n + s) * 0.5, (e + w) * 0.5, gx > gy);
     col = mix(c, avg, blend);
+  }
+  if (U.fx.y > 0.5) {                                          // temporal AA softens a little: restore crispness
+    col = max(c + (c - (n + s + e + w) * 0.25) * 0.55, vec3f(0.0));
   }
   // soft bloom from a wide low-res tap
   var bloom = vec3f(0.0);
@@ -541,6 +584,7 @@ fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
     bloom += max(textureSampleLevel(hdr, samp, i.uv + vec2f(cos(a), sin(a)) * px * 7.0, 0.0).rgb - 1.6, vec3f(0.0));
   }
   col += bloom * 0.05;
+  if (U.fx.x > 0.0) { col *= mix(1.0, ssao(i.uv * U.res), U.fx.x); }
   col *= U.exposure;
   col = aces(col);
   // vignette + film grain + gentle grade
@@ -550,5 +594,57 @@ fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
   let g = fract(sin(dot(i.clip.xy + U.time * 61.0, vec2f(12.9898, 78.233))) * 43758.5453);
   col += (g - 0.5) * 0.012;
   return vec4f(col, 1.0);
+}
+`;
+
+// Temporal anti-aliasing: every frame is rendered with a different sub-pixel offset and blended into a history image.
+// The history is re-projected through the depth buffer, and clamped to the colours around the current pixel so that
+// moving things (vehicles, the character, swaying leaves) do not leave trails.
+export const TAA = /* wgsl */`
+@group(0) @binding(0) var cur: texture_2d<f32>;
+@group(0) @binding(1) var hist: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var depthTex: texture_depth_2d;
+struct T { invViewProj: mat4x4f, prevViewProj: mat4x4f, res: vec2f, jitter: vec2f, blend: f32, p0: f32, p1: f32, p2: f32 };
+@group(0) @binding(4) var<uniform> U: T;
+struct SV { @builtin(position) clip: vec4f };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> SV {
+  var o: SV;
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u));
+  o.clip = vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+  return o;
+}
+fn tm(c: vec3f) -> vec3f { return c / (1.0 + max(c.r, max(c.g, c.b))); }       // reversible tone map: stable blending of HDR
+fn itm(c: vec3f) -> vec3f { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
+@fragment fn fs(i: SV) -> @location(0) vec4f {
+  let px = vec2i(i.clip.xy);
+  let dims = vec2i(U.res);
+  let c = tm(textureLoad(cur, px, 0).rgb);
+  var mn = c; var mx = c;
+  var dmin = textureLoad(depthTex, px, 0);
+  var dpx = px;
+  for (var k = 0; k < 4; k++) {
+    let o = vec2i(select(-1, 1, (k & 1) == 1), select(-1, 1, (k & 2) == 2));
+    let q = clamp(px + o, vec2i(0), dims - 1);
+    let n = tm(textureLoad(cur, q, 0).rgb);
+    mn = min(mn, n); mx = max(mx, n);
+    let d = textureLoad(depthTex, q, 0);
+    if (d < dmin) { dmin = d; dpx = q; }                 // follow the nearest surface: keeps thin edges (wires) stable
+  }
+  for (var k = 0; k < 4; k++) {
+    let o = vec2i(select(0, select(-1, 1, k == 1), k < 2), select(0, select(-1, 1, k == 3), k >= 2));
+    let n = tm(textureLoad(cur, clamp(px + o, vec2i(0), dims - 1), 0).rgb);
+    mn = min(mn, n); mx = max(mx, n);
+  }
+  let uv = (vec2f(px) + 0.5) / U.res;
+  let ndc = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0) - U.jitter;
+  let w = U.invViewProj * vec4f(ndc, dmin, 1.0);
+  let pc = U.prevViewProj * vec4f(w.xyz / w.w, 1.0);
+  let pn = pc.xy / pc.w;
+  let puv = vec2f(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+  var blend = U.blend;
+  if (pc.w <= 0.0 || puv.x < 0.0 || puv.x > 1.0 || puv.y < 0.0 || puv.y > 1.0) { blend = 1.0; }
+  let h = clamp(tm(textureSampleLevel(hist, samp, puv, 0.0).rgb), mn, mx);
+  return vec4f(itm(mix(h, c, blend)), 1.0);
 }
 `;
