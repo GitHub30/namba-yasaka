@@ -99,6 +99,29 @@ fn skyColor(dir: vec3f, withSun: bool) -> vec3f {
   }
   return col;
 }
+// What a mirror on the street sees: sky (with clouds and the sun when sharp is set), a skyline of buildings around the
+// horizon and the road below. Used for vehicle paint, glass and lamp lenses.
+fn envColor(dir: vec3f, rough: f32, sharp: bool) -> vec3f {
+  let d = normalize(vec3f(dir.xy, max(dir.z, 0.0) + 0.015));
+  var c: vec3f;
+  if (sharp) { c = skyColor(d, true); } else { c = skyBase(d); }
+  let day = F.day;
+  let sunUp = max(F.sunDir.z, 0.0);
+  // skyline: blocks of different heights by azimuth, lit on the sun side
+  let az = atan2(dir.y, dir.x);
+  let k = floor(az * 7.0);
+  let hb = 0.05 + 0.30 * hash21(vec2f(k, 3.1)) * hash21(vec2f(k, 9.7));
+  let soft = 0.012 + rough * 0.25;
+  let b = 1.0 - smoothstep(hb - soft, hb + soft, dir.z);
+  let facing = 0.5 + 0.5 * dot(normalize(dir.xy + 1e-4), normalize(F.sunDir.xy + 1e-4));
+  let wall = mix(vec3f(0.006, 0.007, 0.010), vec3f(0.30, 0.29, 0.27) * (0.35 + 0.9 * facing * sunUp), day) * (0.7 + 0.6 * hash21(vec2f(k, 5.3)));
+  c = mix(c, wall, b);
+  // road
+  let road = mix(vec3f(0.003), vec3f(0.085, 0.085, 0.090) * (0.45 + 1.1 * sunUp), day);
+  c = mix(c, road, 1.0 - smoothstep(-0.05 - rough * 0.3, 0.015, dir.z));
+  return c;
+}
+
 fn ambientSky(n: vec3f) -> vec3f {
   let day = smoothstep(-0.12, 0.10, F.sunDir.z);
   let up = mix(vec3f(0.010, 0.013, 0.026), vec3f(0.30, 0.44, 0.74), day);
@@ -388,34 +411,65 @@ fn shade(i: VOut, front: bool) -> vec4f {
 
   if (i.fade < 0.5 && kind != 11u) {
     let cc = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
-    col += skyColor(normalize(vec3f(R.xy, abs(R.z) + 0.03)), false) * cc * (1.0 - rough) * 0.55 * mix(0.4, 1.0, sh);
+    col += envColor(R, rough, false) * cc * (1.0 - rough) * 0.85 * mix(0.55, 1.0, sh);
   }
   // emission: lamps and lit interiors come up at dusk
   let night = 1.0 - F.day;
   col += albedo * emis * mix(0.35, 2.6, night);
 
-  // vehicle lamps (tagged at export): 20 warning lamp, 21 tail / stop, 22 turn signal, 23 headlamp
+  // vehicle lamps (tagged at export): 20 warning lamp, 21 tail / stop, 22 turn signal, 23 headlamp.
+  // A lamp is a smooth clear shell over a faceted chrome reflector: light enters, bounces off a facet and leaves through
+  // the tinted lens, so the lamp shows a broken-up, coloured mirror image of its surroundings under a sharp reflection.
   if (kind >= 20u) {
     let left = i.lpos.y > 0.0;
+    let Ng = normalize(i.nrm) * select(-1.0, 1.0, front);
+    let nvg = max(dot(Ng, V), 1e-3);
+    // lens tint from the baked lens colour (saturated), clear for headlamps
+    var tint = srgbToLinear(i.col.rgb);
+    tint = tint / max(max(tint.r, max(tint.g, tint.b)), 1e-3);
+    tint = pow(tint, vec3f(1.6));
+    // reflector optics in object space, pushed back along the view ray for depth (the pattern sits behind the lens)
+    let depth = 0.012;
+    let pin = i.lpos * 64.0 + (V - Ng * nvg) * (depth * 64.0 / nvg);
+    let cell = floor(pin);
+    let fc = fract(pin) - 0.5;
+    let facet = normalize(vec3f(fc.x, fc.y, fc.z) + (vec3f(hash31(cell), hash31(cell + 7.3), hash31(cell + 13.1)) - 0.5) * 0.5);
+    let Nin = normalize(Ng + facet * 0.85);
+    let Rin = reflect(-V, Nin);
+    var inner = envColor(Rin, 0.08, false);
+    inner += F.lightColor * sh * pow(max(dot(Rin, L), 0.0), 90.0) * 14.0;            // sun glints off facets
+    inner += ambientSky(Ng) * 0.25 + F.lightColor * ndl * sh * 0.10;                   // light scattered inside the housing
+    // dark gaps between optics give the lamp structure
+    let gap = smoothstep(0.50, 0.42, max(abs(fc.x), max(abs(fc.y), abs(fc.z))));
+    inner *= mix(0.35, 1.0, gap);
+    let fres = 0.04 + 0.96 * pow(1.0 - nvg, 5.0);
+    let Rs = reflect(-V, Ng);
+    var surf = envColor(Rs, 0.0, true) * fres;
+    let Hs = normalize(L + V);
+    surf += F.lightColor * max(dot(Ng, L), 0.0) * sh * D_GGX(max(dot(Ng, Hs), 0.0), 0.0025) * V_Smith(nvg, max(dot(Ng, L), 1e-3), 0.0025) * 0.04;
     var e = vec3f(0.0);
+    let guide = 0.55 + 0.9 * smoothstep(0.30, 0.05, abs(fract(i.lpos.z * 16.0) - 0.5));   // LED light-guide lines
     if (kind == 20u) {
       let ph = fract(F.time * 1.7);
       let lit = step(fract(ph * 6.0), 0.55) * select(step(0.5, ph), 1.0 - step(0.5, ph), left);
-      e = vec3f(1.0, 0.035, 0.02) * (0.10 + 26.0 * lit) * i.lights.x + albedo * 0.15 * night;
+      e = vec3f(1.0, 0.035, 0.02) * (26.0 * lit * i.lights.x) * (0.6 + 0.8 * gap);
     } else if (kind == 21u) {
-      e = vec3f(1.0, 0.03, 0.02) * (1.1 * night + 11.0 * i.lights.w);
+      e = vec3f(1.0, 0.03, 0.02) * (1.3 * night + 11.0 * i.lights.w) * guide;
     } else if (kind == 22u) {
-      e = vec3f(1.0, 0.36, 0.02) * 14.0 * select(i.lights.z, i.lights.y, left);
+      e = vec3f(1.0, 0.36, 0.02) * 14.0 * select(i.lights.z, i.lights.y, left) * (0.6 + 0.8 * gap);
     } else {
-      e = vec3f(1.0, 0.95, 0.86) * (0.5 + 10.0 * night);
+      e = vec3f(1.0, 0.95, 0.86) * (0.4 + 10.0 * night) * (0.5 + gap);
     }
-    col += e;
+    col = inner * tint * (1.0 - fres) * 1.15 + surf + e;
+    // nearby warning-lamp glow still lands on the lens
+    col += tint * vec3f(1.0, 0.05, 0.03) * (beaconLight(F.beaconA, i.wpos, Ng) + beaconLight(F.beaconB, i.wpos, Ng)) * 0.1;
   }
 
   var outA = 1.0;
   if (kind == 11u) {   // glass: reflective, mostly see-through
     let fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
-    let envG = skyColor(normalize(vec3f(R.xy, abs(R.z) + 0.02)), true);
+    var envG = skyColor(normalize(vec3f(R.xy, abs(R.z) + 0.02)), true);
+    if (i.fade < 0.5) { envG = envColor(R, 0.0, true); }
     col = envG * fres * 1.0 + vec3f(0.02, 0.025, 0.03) * ambientSky(N) + spec * F.lightColor * ndl * sh;
     // interior glow at night
     let lit = step(0.55, hash21(floor(i.wpos.xy * 0.35) + floor(i.wpos.z * 0.33)));
