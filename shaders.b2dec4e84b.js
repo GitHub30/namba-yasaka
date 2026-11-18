@@ -384,6 +384,53 @@ fn beaconLight(b: vec4f, wpos: vec3f, N: vec3f) -> f32 {
   return b.w * 46.0 / (1.5 + d2) * max(dot(N, lv * inverseSqrt(d2 + 1e-4)), 0.0) * (1.0 - smoothstep(18.0, 30.0, sqrt(d2)));
 }
 
+// Interior mapping: a room behind every upper-floor window, found by intersecting the view ray with the walls, floor
+// and ceiling of a grid of rooms. No geometry, no textures - but it has real parallax, so windows stop being flat.
+fn interiorRoom(p: vec3f, V: vec3f, N: vec3f, night: f32) -> vec3f {
+  let d = -V;
+  let a = abs(N);
+  // axes: u along the facade, z up, n into the building
+  var u = vec3f(1.0, 0.0, 0.0); var nrm = vec3f(0.0, sign(N.y + 1e-5), 0.0);
+  if (a.x > a.y) { u = vec3f(0.0, 1.0, 0.0); nrm = vec3f(sign(N.x + 1e-5), 0.0, 0.0); }
+  let S = vec3f(3.6, 2.85, 4.2);                         // room width, storey height, depth
+  let pu = dot(p, u) / S.x; let pz = (p.z - 0.25) / S.y;
+  let du = dot(d, u) / S.x; let dz = d.z / S.y; let dn = max(-dot(d, nrm), 1e-3) / S.z;
+  let cu = floor(pu); let cz = floor(pz);
+  let tu = (cu + step(0.0, du) - pu) / (du + sign(du + 1e-6) * 1e-5);
+  let tz = (cz + step(0.0, dz) - pz) / (dz + sign(dz + 1e-6) * 1e-5);
+  let tn = 1.0 / dn;
+  let t = min(tn, min(tu, tz));
+  let room = vec2f(cu, cz);
+  let h = hash21(room + 3.7); let h2 = hash21(room * 1.7 + 9.1);
+  let lit = step(0.50, h) * night;                        // about half the rooms have their lights on at night
+  let fu = fract(pu + du * t); let fz = fract(pz + dz * t); let fn_ = t * dn;      // where the ray lands, 0..1
+  var c: vec3f;
+  let wallTint = mix(vec3f(0.78, 0.76, 0.70), vec3f(0.62, 0.66, 0.72), h2);
+  if (t == tn) {
+    // back wall: a door or shelving block, a picture, skirting
+    c = wallTint * 0.85;
+    let door = step(abs(fu - (0.25 + 0.5 * h2)), 0.11) * step(fz, 0.72);
+    c = mix(c, vec3f(0.30, 0.22, 0.15), door);
+    let shelf = step(abs(fu - (0.78 - 0.5 * h2)), 0.14) * step(fz, 0.45) * (1.0 - door);
+    c = mix(c, vec3f(0.42, 0.38, 0.33) * (0.7 + 0.5 * step(0.5, fract(fz * 9.0))), shelf);
+  } else if (t == tz) {
+    if (dz > 0.0) { c = vec3f(0.86, 0.85, 0.82); let lamp = 1.0 - smoothstep(0.02, 0.10, length(vec2f(fu - 0.5, fn_ - 0.45))); c += vec3f(4.0, 3.6, 2.9) * lamp * lit; }
+    else { c = mix(vec3f(0.36, 0.27, 0.19), vec3f(0.42, 0.42, 0.44), step(0.6, h2)); }
+  } else {
+    c = wallTint * 0.72;
+  }
+  // curtains / blinds drawn across part of some windows, just behind the glass
+  let cur = step(0.62, h2) * step(fract(pu), 0.28 + 0.4 * h);
+  // light: daylight falling in from the window by day, the ceiling lamp at night
+  let depth = clamp(t * dn, 0.0, 1.0);
+  let dayIn = mix(0.55, 0.10, depth) * F.day * (0.6 + 0.6 * max(F.sunDir.z, 0.0));
+  let lampIn = lit * mix(0.55, 0.95, 1.0 - abs(fz - 0.6)) * mix(vec3f(1.0, 0.78, 0.50), vec3f(0.85, 0.92, 1.0), step(0.75, h2));
+  var outc = c * (vec3f(dayIn) * ambientSky(vec3f(0.0, 0.0, 1.0)) * 2.2 + lampIn * 1.6 + 0.004);
+  let curtain = mix(vec3f(0.80, 0.78, 0.72), vec3f(0.55, 0.60, 0.50), h) * (0.9 + 0.1 * sin(pu * S.x * 40.0));
+  outc = mix(outc, curtain * (ambientSky(N) * 0.9 * F.day + lampIn * 0.5 + 0.003), cur);
+  return outc;
+}
+
 struct FOut { @location(0) color: vec4f };
 
 fn shade(i: VOut, front: bool) -> vec4f {
@@ -556,6 +603,13 @@ fn shade(i: VOut, front: bool) -> vec4f {
     let lit = step(0.55, hash21(floor(i.wpos.xy * 0.35) + floor(i.wpos.z * 0.33)));
     col += vec3f(1.0, 0.82, 0.55) * lit * night * 0.9;
     outA = clamp(max(fres, 0.38) + lit * night * 0.5, 0.0, 1.0) * max(alpha, 0.35) + 0.25;
+    if (i.fade > 0.5 && i.wpos.z > 3.3 && abs(N.z) < 0.5) {
+      // upper floors: a room behind the glass (ground-floor glass stays see-through: shops have real interiors)
+      let Ng = normalize(i.nrm) * select(-1.0, 1.0, front);
+      let room = interiorRoom(i.wpos - Ng * 0.03, V, Ng, night);
+      col = room * (1.0 - fres) * 0.92 + envG * fres + spec * F.lightColor * ndl * sh;
+      outA = 1.0;
+    }
   }
   col = applyFog(col, i.wpos);
   if (i.fade < 0.5 && kind != 11u) { outA = 0.5; }       // marks moving objects for the temporal pass
