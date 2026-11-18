@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.329a95c47d.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.f7b9c277d0.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -74,6 +74,14 @@ async function main() {
   const ga = new Float32Array(Math.max(groups.length, 1) * 7);
   groups.forEach(({ g }, i) => ga.set([...g.min, ...g.max, g.count], i * 7));
   wasm.set_groups(put(ga), groups.length);
+  // loose props (cones, bicycles, pots ...): rigid bodies simulated by the core
+  const props = world.props || [];
+  if (props.length) {
+    const pa = new Float32Array(props.length * 6);
+    props.forEach((q, i) => pa.set([...q.pos, ...q.half, q.h], i * 6));
+    wasm.set_props(put(pa), props.length);
+  }
+  const [propV, propI] = props.length ? await Promise.all([bin("props_vtx.bin"), bin("props_idx.bin")]) : [null, null];
 
   stage("GPU にデータを転送中…");
   const mkBuf = (data, usage) => {
@@ -91,6 +99,7 @@ async function main() {
   // dynamic objects: matrix slots follow the core (0 police body, 1-4 wheels, 5 engine body, 6-11 wheels, 12-21 character)
   const DYN_BASE = [0, 5];
   const vehicles = VEH.map((n, i) => ({ name: n, info: vehData[i * 3], vb: mkBuf(vehData[i * 3 + 1], GPUBufferUsage.VERTEX), ib: mkBuf(vehData[i * 3 + 2], GPUBufferUsage.INDEX), base: DYN_BASE[i], door: 22 + i * 2 }));
+  const PVB = propV ? mkBuf(propV, GPUBufferUsage.VERTEX) : null, PIB = propI ? mkBuf(propI, GPUBufferUsage.INDEX) : null;
   const chr = { info: charJ, vb: mkBuf(charV, GPUBufferUsage.VERTEX), ib: mkBuf(charI, GPUBufferUsage.INDEX), base: 12 };
 
   // ---------------------------------------------------------------- pipelines
@@ -414,6 +423,7 @@ async function main() {
     teleport: (...a) => wasm.teleport(...a), hour: (h) => wasm.set_hour(h), setScale: (v) => { autoScale = false; scale = v; },
     placeVehicle: (i, x, y, yaw) => wasm.place_vehicle(i, x, y, yaw), press: (k) => { once[k] = true; },
     frame: () => Array.from(new Float32Array(mem(), wasm.frame_ptr(), 96)),
+    dyn: (i) => Array.from(new Float32Array(mem(), wasm.dyn_ptr() + i * 80, 16)),
   };
 
   function drawDyn(p, obj, part, slot) {
@@ -480,6 +490,10 @@ async function main() {
     if (f[92] < 0.5) {
       p.setVertexBuffer(0, chr.vb); p.setIndexBuffer(chr.ib, "uint32");
       chr.info.order.forEach((name, i) => drawDyn(p, chr, chr.info.parts[name], chr.base + i));
+    }
+    if (PVB) {
+      p.setVertexBuffer(0, PVB); p.setIndexBuffer(PIB, "uint32");
+      for (let i = 0; i < props.length; i++) drawDyn(p, null, props[i], 26 + i);
     }
     p.setPipeline(pSky); p.setBindGroup(0, bgFrame); p.draw(3);
     p.setBindGroup(0, bgWorld);

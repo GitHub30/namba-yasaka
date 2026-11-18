@@ -244,28 +244,49 @@ fn detail(kind: u32, p: vec3f, n: vec3f, dist: f32, px: f32) -> Detail {
   let big = vnoise(p * 0.45) * 0.65 + vnoise(p * 1.7 + 9.1) * 0.35;   // large-scale tonal variation (all kinds)
   d.albedo *= 0.90 + 0.20 * big;
   let e = 0.02;
-  if (kind == 1u) {            // asphalt: aggregate + patches + cracks
-    let g = hash21(floor(uv * 180.0));
-    let g2 = vnoise(vec3f(uv * 45.0, 0.0));
-    d.albedo *= 1.0 + (g - 0.5) * 0.45 * lod(180.0, px) + (g2 - 0.5) * 0.25 * lod(45.0, px);
-    let patchK = smoothstep(0.52, 0.56, fbm(vec3f(floor(uv * 0.35) * 3.1, 2.0))) ;
-    d.albedo *= mix(1.0, 0.78, patchK * 0.6);
-    let cr = abs(vnoise(vec3f(uv * 2.3, 9.0)) - 0.5);
-    d.albedo *= mix(1.0, mix(0.55, 1.0, smoothstep(0.0, 0.012, cr)), lod(8.0, px));
-    d.rough = 0.08 * (g - 0.5);
-    d.bump = vec3f(g - 0.5, hash21(floor(uv * 180.0) + 7.0) - 0.5, 0.0) * 0.55 * lod(180.0, px);
+  if (kind == 1u) {            // asphalt: bitumen with exposed aggregate at three sizes, tar patches, oil, polished wheel paths
+    let c1 = floor(uv * 260.0); let c2 = floor(uv * 95.0); let c3 = floor(uv * 34.0);
+    let s1 = hash21(c1); let s2 = hash21(c2 + 17.0); let s3 = hash21(c3 + 41.0);
+    let f1 = lod(260.0, px); let f2 = lod(95.0, px); let f3 = lod(34.0, px);
+    // pale stones showing through the dark binder
+    let stone = step(0.80, s1) * f1 * 0.55 + step(0.86, s2) * f2 * 0.42 + step(0.93, s3) * f3 * 0.22;
+    let binder = (s1 - 0.5) * 0.22 * f1 + (s2 - 0.5) * 0.14 * f2;
+    d.albedo *= 1.0 + stone + binder;
+    // older, greyer surface in blotches; dark tar patches with soft edges; a few oil drips
+    let age = vnoise(vec3f(uv * 0.9, 3.0));
+    d.albedo *= mix(0.86, 1.12, smoothstep(0.30, 0.75, age));
+    let patchK = smoothstep(0.60, 0.66, vnoise(vec3f(uv * 0.33, 7.0)));
+    d.albedo *= mix(1.0, 0.72, patchK);
+    let oil = smoothstep(0.80, 0.90, vnoise(vec3f(uv * 2.6, 11.0))) * lod(3.0, px);
+    d.albedo *= mix(1.0, 0.55, oil);
+    d.rough = -0.22 * oil + (s1 - 0.5) * 0.10 * f1 - 0.05 * patchK;
+    d.bump = vec3f(s1 - 0.5, hash21(c1 + 7.0) - 0.5, 0.0) * 0.75 * f1 + vec3f(s2 - 0.5, hash21(c2 + 5.0) - 0.5, 0.0) * 0.45 * f2;
+    d.ao = 1.0 - 0.18 * (1.0 - s2) * f2;
   } else if (kind == 2u || kind == 6u) {   // concrete / plaster: pores, stains
     let g = vnoise(vec3f(uv * 60.0, 1.0));
     d.albedo *= 1.0 + (g - 0.5) * 0.14 * lod(60.0, px);
     let st = fbm(vec3f(uv.x * 1.3, uv.y * 0.25, 3.0));
     d.albedo *= mix(1.0, 0.80, smoothstep(0.52, 0.80, st) * abs(n.z - 1.0));
     d.bump = vec3f(vnoise(vec3f(uv * 90.0, 2.0)) - 0.5, vnoise(vec3f(uv * 90.0, 5.0)) - 0.5, 0.0) * 0.25 * fade;
-  } else if (kind == 3u || kind == 15u) {  // stone / gravel: speckle
-    let g = hash21(floor(uv * 260.0));
-    let m = vnoise(vec3f(uv * 12.0, 4.0));
-    d.albedo *= 1.0 + (g - 0.5) * 0.30 * lod(260.0, px) + (m - 0.5) * 0.18 * lod(12.0, px);
-    d.bump = vec3f(g - 0.5, hash21(floor(uv * 260.0) + 3.0) - 0.5, 0.0) * 0.35 * lod(260.0, px);
-    if (kind == 15u) { d.bump *= 2.2; d.albedo *= 1.0 + (hash21(floor(uv * 60.0)) - 0.3) * 0.3 * lod(60.0, px); }
+  } else if (kind == 3u || kind == 15u) {  // stone (granite: fine crystals) / gravel (pebbles at two sizes)
+    let c1 = floor(uv * 300.0); let c2 = floor(uv * 110.0);
+    let s1 = hash21(c1); let s2 = hash21(c2 + 9.0);
+    let f1 = lod(300.0, px); let f2 = lod(110.0, px);
+    let m = vnoise(vec3f(uv * 9.0, 4.0));
+    if (kind == 3u) {
+      // dark mica flecks, pale feldspar, soft mottling
+      d.albedo *= 1.0 + (s1 - 0.5) * 0.34 * f1 - step(0.90, s2) * 0.30 * f2 + step(0.93, hash21(c2 + 31.0)) * 0.22 * f2 + (m - 0.5) * 0.16 * lod(9.0, px);
+      d.rough = (s1 - 0.5) * 0.16 * f1;
+      d.bump = vec3f(s1 - 0.5, hash21(c1 + 3.0) - 0.5, 0.0) * 0.40 * f1;
+    } else {
+      let c3 = floor(uv * 42.0); let s3 = hash21(c3 + 23.0);
+      let f3 = lod(42.0, px);
+      let q = fract(uv * 42.0) - 0.5;
+      let pebble = (1.0 - smoothstep(0.20, 0.48, length(q + (vec2f(s3, hash21(c3 + 2.0)) - 0.5) * 0.3))) * f3;
+      d.albedo *= 1.0 + (s3 - 0.5) * 0.55 * f3 + (s2 - 0.5) * 0.35 * f2 + (s1 - 0.5) * 0.20 * f1 - 0.28 * (1.0 - pebble) * f3 + (m - 0.5) * 0.12;
+      d.bump = vec3f(q.x, q.y, 0.0) * pebble * 2.2 + vec3f(s2 - 0.5, hash21(c2 + 5.0) - 0.5, 0.0) * 0.6 * f2;
+      d.ao = 1.0 - 0.25 * (1.0 - pebble) * f3;
+    }
   } else if (kind == 4u) {     // brick: running bond 240 x 80 mm
     let bw = 0.24; let bh = 0.08;
     let row = floor(uv.y / bh);
