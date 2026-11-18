@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.f7b9c277d0.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.f27075a323.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -106,7 +106,7 @@ async function main() {
   const SHADOW = Math.min(MOBILE ? 2048 : 4096, device.limits.maxTextureDimension2D);
   const shadowTex = device.createTexture({ size: [SHADOW, SHADOW], format: "depth32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
   const shadowView = shadowTex.createView();
-  const FRAME_FLOATS = 84;
+  const FRAME_FLOATS = 100;
   const frameUBO = device.createBuffer({ size: FRAME_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const shadowUBO = device.createBuffer({ size: FRAME_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const lFrame = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: {} }] });
@@ -114,11 +114,21 @@ async function main() {
     { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: {} },
     { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "depth" } },
     { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "comparison" } },
+    { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "depth" } },
+    { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
   ] });
+  const MAX_LAMPS = 12;
+  const lampUBO = device.createBuffer({ size: 16 + MAX_LAMPS * 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const lampData = new Float32Array(4 + MAX_LAMPS * 8);
+  const lamps = (world.lights || []).map((l) => ({ ...l, d: 0 }));
+  const DSHADOW = 1024;
+  const dynShadowView = device.createTexture({ size: [DSHADOW, DSHADOW], format: "depth32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }).createView();
+  const dynShadowUBO = device.createBuffer({ size: FRAME_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cmpSamp = device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear" });
-  const bgWorld = device.createBindGroup({ layout: lWorld, entries: [{ binding: 0, resource: { buffer: frameUBO } }, { binding: 1, resource: shadowView }, { binding: 2, resource: cmpSamp }] });
+  const bgWorld = device.createBindGroup({ layout: lWorld, entries: [{ binding: 0, resource: { buffer: frameUBO } }, { binding: 1, resource: shadowView }, { binding: 2, resource: cmpSamp }, { binding: 3, resource: dynShadowView }, { binding: 4, resource: { buffer: lampUBO } }] });
   const bgFrame = device.createBindGroup({ layout: lFrame, entries: [{ binding: 0, resource: { buffer: frameUBO } }] });
   const bgShadow = device.createBindGroup({ layout: lFrame, entries: [{ binding: 0, resource: { buffer: shadowUBO } }] });
+  const bgDynShadow = device.createBindGroup({ layout: lFrame, entries: [{ binding: 0, resource: { buffer: dynShadowUBO } }] });
 
   stage("シェーダーをコンパイル中…");
   const modWorld = device.createShaderModule({ code: COMMON + WORLD });
@@ -156,6 +166,10 @@ async function main() {
     fragment: { module: modWorld, entryPoint: "fsWorld", targets: [{ format: HDR, blend }] },
     primitive: { topology: "triangle-list", cullMode: "none" },
     depthStencil: { format: DEPTH, depthWriteEnabled: depthWrite, depthCompare: "less" } });
+  const pShadowDyn = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [lFrame, lModel] }), vertex: { module: modWorld, entryPoint: "vsShadowDyn", buffers: [vAttr] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 2.0 } });
   const pOpaque = mkMain("vsWorld", [vAttr], undefined, true);
   const pInst = mkMain("vsInst", [vAttr, iAttr], undefined, true);
   const pTrans = mkMain("vsWorld", [vAttr], alphaBlend, false);
@@ -422,7 +436,7 @@ async function main() {
   window.__game = {
     teleport: (...a) => wasm.teleport(...a), hour: (h) => wasm.set_hour(h), setScale: (v) => { autoScale = false; scale = v; },
     placeVehicle: (i, x, y, yaw) => wasm.place_vehicle(i, x, y, yaw), press: (k) => { once[k] = true; },
-    frame: () => Array.from(new Float32Array(mem(), wasm.frame_ptr(), 96)),
+    frame: () => Array.from(new Float32Array(mem(), wasm.frame_ptr(), 128)),
     dyn: (i) => Array.from(new Float32Array(mem(), wasm.dyn_ptr() + i * 80, 16)),
   };
 
@@ -449,11 +463,31 @@ async function main() {
     const jx = (jit[0] * 2) / RW, jy = (jit[1] * 2) / RH;        // NDC units
     inp[17] = jx; inp[18] = jy;
     wasm.update(dt);
-    const f = new Float32Array(mem(), wasm.frame_ptr(), 112);
+    const f = new Float32Array(mem(), wasm.frame_ptr(), 128);
     hour = f[63]; flying = f[67] > 0.5;
     fu.set(f.subarray(0, 64)); fu[64] = RW; fu[65] = RH; fu[66] = 1 / SHADOW; fu[67] = world.ao ? 1 : 0;
     fu.set(f.subarray(72, 88), 68);                    // car0, car1, beaconA, beaconB
+    fu.set(f.subarray(112, 128), 84);                  // dynamic shadow matrix
     device.queue.writeBuffer(frameUBO, 0, fu);
+    {
+      // lamps: the nearest few to the camera, switched on as daylight goes
+      const night = 1 - f[55];
+      const on = Math.max(0, Math.min(1, (night - 0.25) / 0.45));
+      let n = 0;
+      if (on > 0 && lamps.length) {
+        const cx = f[48], cy = f[49], cz = f[50];
+        for (const l of lamps) l.d = (l.pos[0] - cx) ** 2 + (l.pos[1] - cy) ** 2 + (l.pos[2] - cz) ** 2 - l.power * 60;
+        lamps.sort((a, b) => a.d - b.d);
+        n = Math.min(MAX_LAMPS, lamps.length);
+        for (let i = 0; i < n; i++) {
+          const l = lamps[i], range = 9 + 9 * l.power, e = (l.street ? 13 : 9) * (0.35 + 0.65 * l.power);
+          lampData.set([l.pos[0], l.pos[1], l.pos[2], range], 4 + i * 4);
+          lampData.set([l.col[0] * e, l.col[1] * e, l.col[2] * e, 0], 4 + MAX_LAMPS * 4 + i * 4);
+        }
+      }
+      lampData[0] = n; lampData[1] = on;
+      device.queue.writeBuffer(lampUBO, 0, lampData);
+    }
     const dyn = new Float32Array(mem(), wasm.dyn_ptr(), N_DYN * 20);
     for (let i = 0; i < N_DYN; i++) dynData.set(dyn.subarray(i * 20, i * 20 + 20), (i * DYN_ALIGN) / 4);
     device.queue.writeBuffer(dynUBO, 0, dynData);
@@ -461,6 +495,25 @@ async function main() {
     if (f[64] > 0.5 || shadowFrames === 0) {
       device.queue.writeBuffer(shadowUBO, 0, fu);
       drawShadow(enc); shadowFrames++;
+    }
+    {
+      const du = fu.slice(); du.set(f.subarray(112, 128), 32);       // same block, with the light matrix swapped in
+      device.queue.writeBuffer(dynShadowUBO, 0, du);
+      const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: dynShadowView, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" } });
+      sp.setPipeline(pShadowDyn); sp.setBindGroup(0, bgDynShadow);
+      const sd = (part, slot) => { sp.setBindGroup(1, bgModel, [slot * DYN_ALIGN]); sp.drawIndexed(part.count, 1, part.first, part.base, 0); };
+      for (const v of vehicles) {
+        sp.setVertexBuffer(0, v.vb); sp.setIndexBuffer(v.ib, "uint32");
+        sd(v.info.parts.body, v.base); if (v.info.parts.glass) sd(v.info.parts.glass, v.base);
+        v.info.wheels.forEach((_, i) => sd(v.info.parts.wheel, v.base + 1 + i));
+        ["door_r", "door_l"].forEach((n, k) => { if (v.info.parts[n]) sd(v.info.parts[n], v.door + k); });
+      }
+      if (f[92] < 0.5 || f[94] > 0.5) {                               // in first person the body is hidden but still casts a shadow
+        sp.setVertexBuffer(0, chr.vb); sp.setIndexBuffer(chr.ib, "uint32");
+        chr.info.order.forEach((name, i) => sd(chr.info.parts[name], chr.base + i));
+      }
+      if (PVB) { sp.setVertexBuffer(0, PVB); sp.setIndexBuffer(PIB, "uint32"); for (let i = 0; i < props.length; i++) sd(props[i], 26 + i); }
+      sp.end();
     }
     const visO = new Uint32Array(mem(), wasm.vis_opaque_ptr(), wasm.vis_opaque_len());
     const visT = new Uint32Array(mem(), wasm.vis_trans_ptr(), wasm.vis_trans_len());
@@ -508,7 +561,7 @@ async function main() {
       ["door_r_glass", "door_l_glass"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
     p.end();
-    device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.9 * (1 - f[55]), f[51], f[65], f[66], Math.tan(1.05 / 2), RW / RH, fx.ssao ? 0.85 : 0, fx.taa ? 1 : 0, frameNo % 64, 0]));
+    device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.55 * (1 - f[55]), f[51], f[65], f[66], Math.tan(1.05 / 2), RW / RH, fx.ssao ? 0.85 : 0, fx.taa ? 1 : 0, frameNo % 64, 0]));
     let postBG = bgPost;
     if (fx.taa) {
       const w = frameNo & 1, r = 1 - w;                         // write history w, read history r

@@ -13,6 +13,7 @@ struct Frame {
   car1: vec4f,         // fire engine
   beaconA: vec4f,      // warning-lamp glow: xyz, intensity
   beaconB: vec4f,
+  dynLightViewProj: mat4x4f,   // small shadow map that follows the player: vehicles, character, props
 };
 @group(0) @binding(0) var<uniform> F: Frame;
 
@@ -135,6 +136,10 @@ fn ambientSky(n: vec3f) -> vec3f {
 export const WORLD = /* wgsl */`
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
 @group(0) @binding(2) var shadowSamp: sampler_comparison;
+@group(0) @binding(3) var dynShadow: texture_depth_2d;
+// the lamps nearest to the camera (street lights, shop fronts, lanterns): lit at dusk and at night
+struct Lamps { count: vec4f, pos: array<vec4f, 12>, col: array<vec4f, 12> };
+@group(0) @binding(4) var<uniform> LP: Lamps;
 
 struct VIn {
   @location(0) pos: vec3f,
@@ -196,6 +201,7 @@ struct Model { m: mat4x4f, lights: vec4f };
 }
 
 @vertex fn vsShadow(v: VIn) -> @builtin(position) vec4f { return F.lightViewProj * vec4f(v.pos, 1.0); }
+@vertex fn vsShadowDyn(v: VIn) -> @builtin(position) vec4f { return F.lightViewProj * (M.m * vec4f(v.pos, 1.0)); }
 @vertex fn vsShadowInst(v: VIn, i: IIn) -> @builtin(position) vec4f {
   let p = vec3f(dot(i.r0.xyz, v.pos) + i.r0.w, dot(i.r1.xyz, v.pos) + i.r1.w, dot(i.r2.xyz, v.pos) + i.r2.w);
   return F.lightViewProj * vec4f(p, 1.0);
@@ -217,7 +223,22 @@ fn shadow(wpos: vec3f, n: vec3f, ndl: f32) -> f32 {
   s += textureSampleCompareLevel(shadowMap, shadowSamp, uv + vec2f(-cs.y, cs.x) * t * 1.6, z);
   s += textureSampleCompareLevel(shadowMap, shadowSamp, uv - vec2f(cs.x, cs.y) * t * 1.6, z);
   s += textureSampleCompareLevel(shadowMap, shadowSamp, uv - vec2f(-cs.y, cs.x) * t * 1.6, z);
-  return mix(1.0, s * 0.2, inside);
+  var res = mix(1.0, s * 0.2, inside);
+  // moving things: vehicles, the character and loose props cast shadows from their own small map
+  let lp2 = F.dynLightViewProj * vec4f(wpos + bias * 0.6, 1.0);
+  let uv2 = lp2.xy * vec2f(0.5, -0.5) + 0.5;
+  if (uv2.x > 0.0 && uv2.x < 1.0 && uv2.y > 0.0 && uv2.y < 1.0 && lp2.z > 0.0 && lp2.z < 1.0) {
+    let z2 = lp2.z - 0.0009;
+    let t2 = 1.0 / 1024.0;
+    var d = textureSampleCompareLevel(dynShadow, shadowSamp, uv2, z2);
+    d += textureSampleCompareLevel(dynShadow, shadowSamp, uv2 + vec2f(cs.x, cs.y) * t2 * 1.5, z2);
+    d += textureSampleCompareLevel(dynShadow, shadowSamp, uv2 + vec2f(-cs.y, cs.x) * t2 * 1.5, z2);
+    d += textureSampleCompareLevel(dynShadow, shadowSamp, uv2 - vec2f(cs.x, cs.y) * t2 * 1.5, z2);
+    d += textureSampleCompareLevel(dynShadow, shadowSamp, uv2 - vec2f(-cs.y, cs.x) * t2 * 1.5, z2);
+    let edge = min(min(uv2.x, 1.0 - uv2.x), min(uv2.y, 1.0 - uv2.y));
+    res = min(res, mix(1.0, d * 0.2, smoothstep(0.0, 0.05, edge)));
+  }
+  return res;
 }
 
 fn D_GGX(nh: f32, a: f32) -> f32 { let a2 = a * a; let d = nh * nh * (a2 - 1.0) + 1.0; return a2 / (PI * d * d + 1e-6); }
@@ -404,7 +425,6 @@ fn shade(i: VOut, front: bool) -> vec4f {
   var carOcc = 0.0;
   if (i.fade > 0.5 && i.wpos.z < 0.5) {
     carOcc = max(underCar(i.wpos, F.car0, vec2f(2.30, 0.82), -0.10), underCar(i.wpos, F.car1, vec2f(2.95, 0.98), -0.29));
-    sh *= 1.0 - 0.92 * carOcc;
   }
 
   let f0 = mix(vec3f(0.04), albedo, metal);
@@ -435,13 +455,33 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let fr = f0 + (max(vec3f(1.0 - rough), f0) - f0) * pow(1.0 - nv, 5.0);
   col += env * fr * mix(1.0, 0.25, rough) * hemiAO * mix(0.35, 1.0, sh * 0.5 + 0.5);
 
+  // street lights and other lamps after dark (no shadows; the baked occlusion keeps them out of deep corners)
+  let nl = i32(LP.count.x);
+  if (nl > 0) {
+    var lampSum = vec3f(0.0);
+    for (var k = 0; k < nl; k++) {
+      let lv = LP.pos[k].xyz - i.wpos;
+      let d2 = dot(lv, lv);
+      let range = LP.pos[k].w;
+      if (d2 < range * range) {
+        let ld = lv * inverseSqrt(d2 + 1e-4);
+        let win = 1.0 - smoothstep(0.55, 1.0, sqrt(d2) / range);
+        let nd = max(dot(N, ld), 0.0) * 0.85 + 0.15;                  // a little wrap: lamps are area sources
+        let hv = normalize(ld + V);
+        let sp2 = pow(max(dot(N, hv), 0.0), mix(60.0, 6.0, rough)) * (1.0 - rough) * 0.6;
+        lampSum += LP.col[k].rgb * (win / (1.0 + d2 * 0.35)) * (diff * nd / PI + f0 * sp2 + sp2 * 0.04);
+      }
+    }
+    col += lampSum * LP.count.y * mix(0.45, 1.0, bakedAO);
+  }
+
   if (i.fade < 0.5 && kind != 11u) {
     let cc = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
     col += envColor(R, rough, false) * cc * (1.0 - rough) * 0.85 * mix(0.55, 1.0, sh);
   }
   // emission: lamps and lit interiors come up at dusk
   let night = 1.0 - F.day;
-  col += albedo * emis * mix(0.35, 2.6, night);
+  col += albedo * emis * mix(0.35, 1.5, night);
 
   // traffic signals (lenses tagged at export): 24 red, 25 yellow, 26 green. Heads facing north / south serve one
   // direction of traffic, heads facing east / west the other; 44 s cycle with all-red gaps. Pedestrian heads face the
