@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.632ae7e564.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.bae73233a1.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -172,8 +172,8 @@ async function main() {
     { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: {} }] });
   const pTaa = device.createRenderPipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [lTaa] }),
     vertex: { module: modTaa, entryPoint: "vs" }, fragment: { module: modTaa, entryPoint: "fs", targets: [{ format: "rgba16float" }] } });
-  const taaUBO = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const taaData = new Float32Array(40);
+  const taaUBO = device.createBuffer({ size: 176, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const taaData = new Float32Array(44);
   const prevVP = new Float32Array(16);
   const HALTON = Array.from({ length: 8 }, (_, i) => { const h = (n, b) => { let f = 1, r = 0; while (n > 0) { f /= b; r += f * (n % b); n = Math.floor(n / b); } return r; }; return [h(i + 1, 2) - 0.5, h(i + 1, 3) - 0.5]; });
   let histTex = [], histView = [], bgTaa = [], bgPostHist = [], histValid = false, frameNo = 0;
@@ -462,12 +462,13 @@ async function main() {
       ["door_r_glass", "door_l_glass"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
     p.end();
-    device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.9 * (1 - f[55]), f[51], f[65], f[66], Math.tan(1.05 / 2), RW / RH, fx.ssao ? 0.85 : 0, fx.taa ? 1 : 0, 0, 0]));
+    device.queue.writeBuffer(postUBO, 0, new Float32Array([RW, RH, 1.0 + 0.9 * (1 - f[55]), f[51], f[65], f[66], Math.tan(1.05 / 2), RW / RH, fx.ssao ? 0.85 : 0, fx.taa ? 1 : 0, frameNo % 64, 0]));
     let postBG = bgPost;
     if (fx.taa) {
       const w = frameNo & 1, r = 1 - w;                         // write history w, read history r
       taaData.set(f.subarray(16, 32), 0); taaData.set(histValid ? prevVP : f.subarray(96, 112), 16);
       taaData[32] = RW; taaData[33] = RH; taaData[34] = jx; taaData[35] = jy; taaData[36] = histValid ? 0.12 : 1.0;
+      taaData[37] = fx.ssao ? 0.85 : 0; taaData[38] = frameNo % 64; taaData.set([f[65], f[66], Math.tan(1.05 / 2), RW / RH], 40);
       device.queue.writeBuffer(taaUBO, 0, taaData);
       const t = enc.beginRenderPass({ colorAttachments: [{ view: histView[w], loadOp: "clear", storeOp: "store" }] });
       t.setPipeline(pTaa); t.setBindGroup(0, bgTaa[r]); t.draw(3); t.end();
@@ -492,8 +493,8 @@ async function main() {
     if (acc >= 0.5) {
       fps = frames / acc; ms = (acc / frames) * 1000; acc = 0; frames = 0;
       if (autoScale) {           // hold 24-30 fps by trading internal resolution
-        if (fps < 23 && scale > 0.4) scale = Math.max(0.4, scale - 0.05);
-        else if (fps > 34 && scale < 1.0) scale = Math.min(1.0, scale + 0.03);
+        if (fps < 22 && scale > 0.4) scale = Math.max(0.4, scale - 0.05);
+        else if (fps > 29 && scale < 1.0) scale = Math.min(1.0, scale + 0.03);
       }
       const hh = Math.floor(hour), mm = Math.floor((hour - hh) * 60);
       hud.textContent = `${fps.toFixed(1)} fps  ${ms.toFixed(1)} ms   ${RW}x${RH} (x${scale.toFixed(2)})\n` +

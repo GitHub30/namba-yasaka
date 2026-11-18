@@ -422,10 +422,25 @@ fn shade(i: VOut, front: bool) -> vec4f {
   let night = 1.0 - F.day;
   col += albedo * emis * mix(0.35, 2.6, night);
 
+  // traffic signals (lenses tagged at export): 24 red, 25 yellow, 26 green. Heads facing north / south serve one
+  // direction of traffic, heads facing east / west the other; 44 s cycle with all-red gaps. Pedestrian heads face the
+  // same way as the traffic they run parallel to, so the same rule lights their red / green figures.
+  if (kind >= 24u && kind <= 26u) {
+    let Nl = normalize(i.nrm);
+    let ew = abs(Nl.x) > abs(Nl.y);
+    let t = (F.time + select(0.0, 22.0, ew)) % 44.0;
+    let green = t < 16.0; let yellow = t >= 16.0 && t < 19.0;
+    let on = (kind == 26u && green) || (kind == 25u && yellow) || (kind == 24u && !green && !yellow);
+    var lc = vec3f(1.0, 0.045, 0.02);
+    if (kind == 25u) { lc = vec3f(1.0, 0.60, 0.0); } else if (kind == 26u) { lc = vec3f(0.0, 1.0, 0.60); }
+    let led = 0.55 + 0.45 * smoothstep(0.30, 0.10, length(fract(i.wpos.xz * 55.0 + i.wpos.yy * 55.0) - 0.5));   // LED dot matrix
+    col = select(lc * 0.012 + col * 0.05, lc * (7.5 + 3.0 * night) * led, on);
+  }
+
   // vehicle lamps (tagged at export): 20 warning lamp, 21 tail / stop, 22 turn signal, 23 headlamp.
   // A lamp is a smooth clear shell over a faceted chrome reflector: light enters, bounces off a facet and leaves through
   // the tinted lens, so the lamp shows a broken-up, coloured mirror image of its surroundings under a sharp reflection.
-  if (kind >= 20u) {
+  if (kind >= 20u && kind <= 23u) {
     let left = i.lpos.y > 0.0;
     let Ng = normalize(i.nrm) * select(-1.0, 1.0, front);
     let nvg = max(dot(Ng, V), 1e-3);
@@ -532,7 +547,7 @@ fn ssao(frag: vec2f) -> f32 {
   let n = normalize(cross(dy, dx));
   let radius = 0.55;                                     // metres
   let rpx = clamp(radius / (P0.z * U.proj.z) * U.res.y * 0.5, 3.0, 48.0);
-  let rot = fract(52.9829189 * fract(dot(frag, vec2f(0.06711056, 0.00583715)))) * 6.2831853;
+  let rot = fract(52.9829189 * fract(dot(frag + U.fx.z * vec2f(47.0, 17.0), vec2f(0.06711056, 0.00583715)))) * 6.2831853;
   var occ = 0.0;
   for (var k = 0; k < 6; k++) {
     let a = rot + f32(k) * 2.39996;
@@ -575,7 +590,8 @@ fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
     col = mix(c, avg, blend);
   }
   if (U.fx.y > 0.5) {                                          // temporal AA softens a little: restore crispness
-    col = max(c + (c - (n + s + e + w) * 0.25) * 0.55, vec3f(0.0));
+    let lo = min(c, min(min(n, s), min(e, w))); let hi = max(c, max(max(n, s), max(e, w)));
+    col = clamp(c + (c - (n + s + e + w) * 0.25) * 1.1, lo, hi);
   }
   // soft bloom from a wide low-res tap
   var bloom = vec3f(0.0);
@@ -584,7 +600,7 @@ fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
     bloom += max(textureSampleLevel(hdr, samp, i.uv + vec2f(cos(a), sin(a)) * px * 7.0, 0.0).rgb - 1.6, vec3f(0.0));
   }
   col += bloom * 0.05;
-  if (U.fx.x > 0.0) { col *= mix(1.0, ssao(i.uv * U.res), U.fx.x); }
+  if (U.fx.x > 0.0 && U.fx.y < 0.5) { col *= mix(1.0, ssao(i.uv * U.res), U.fx.x); }   // with temporal AA the AO is applied there
   col *= U.exposure;
   col = aces(col);
   // vignette + film grain + gentle grade
@@ -605,8 +621,38 @@ export const TAA = /* wgsl */`
 @group(0) @binding(1) var hist: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var depthTex: texture_depth_2d;
-struct T { invViewProj: mat4x4f, prevViewProj: mat4x4f, res: vec2f, jitter: vec2f, blend: f32, p0: f32, p1: f32, p2: f32 };
+struct T { invViewProj: mat4x4f, prevViewProj: mat4x4f, res: vec2f, jitter: vec2f, blend: f32, ssao: f32, frame: f32, p2: f32, proj: vec4f };
 @group(0) @binding(4) var<uniform> U: T;
+fn viewPos(px: vec2i) -> vec3f {
+  let dims = vec2i(U.res);
+  let q = clamp(px, vec2i(0), dims - 1);
+  let d = textureLoad(depthTex, q, 0);
+  let z = U.proj.x * U.proj.y / (U.proj.y - d * (U.proj.y - U.proj.x));
+  let ndc = (vec2f(q) + 0.5) / U.res * 2.0 - 1.0;
+  return vec3f(ndc.x * U.proj.z * U.proj.w * z, -ndc.y * U.proj.z * z, z);
+}
+fn ssao(px: vec2i) -> f32 {
+  let P0 = viewPos(px);
+  if (P0.z > U.proj.y * 0.6) { return 1.0; }
+  let l = viewPos(px - vec2i(1, 0)); let r = viewPos(px + vec2i(1, 0));
+  let u = viewPos(px - vec2i(0, 1)); let dn = viewPos(px + vec2i(0, 1));
+  let dx = select(r - P0, P0 - l, abs(l.z - P0.z) < abs(r.z - P0.z));
+  let dy = select(dn - P0, P0 - u, abs(u.z - P0.z) < abs(dn.z - P0.z));
+  let n = normalize(cross(dy, dx));
+  let radius = 0.55;
+  let rpx = clamp(radius / (P0.z * U.proj.z) * U.res.y * 0.5, 3.0, 48.0);
+  let rot = fract(52.9829189 * fract(dot(vec2f(px) + U.frame * vec2f(5.588238, 3.1415), vec2f(0.06711056, 0.00583715)))) * 6.2831853;
+  var occ = 0.0;
+  for (var k = 0; k < 6; k++) {
+    let a = rot + f32(k) * 2.39996;
+    let rr = rpx * sqrt((f32(k) + 0.5) / 6.0);
+    let Ps = viewPos(px + vec2i(vec2f(cos(a), sin(a)) * rr));
+    let v = Ps - P0;
+    let d2 = dot(v, v);
+    occ += max(dot(n, v) - 0.03 * P0.z - 0.01, 0.0) / (d2 + 0.004) * step(d2, radius * radius * 2.5);
+  }
+  return clamp(1.0 - occ * 0.36, 0.0, 1.0);
+}
 struct SV { @builtin(position) clip: vec4f };
 @vertex fn vs(@builtin(vertex_index) vi: u32) -> SV {
   var o: SV;
@@ -619,21 +665,23 @@ fn itm(c: vec3f) -> vec3f { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4);
 @fragment fn fs(i: SV) -> @location(0) vec4f {
   let px = vec2i(i.clip.xy);
   let dims = vec2i(U.res);
-  let c = tm(textureLoad(cur, px, 0).rgb);
+  var ao = 1.0;
+  if (U.ssao > 0.0) { ao = mix(1.0, ssao(px), U.ssao); }
+  let c = tm(textureLoad(cur, px, 0).rgb * ao);
   var mn = c; var mx = c;
   var dmin = textureLoad(depthTex, px, 0);
   var dpx = px;
   for (var k = 0; k < 4; k++) {
     let o = vec2i(select(-1, 1, (k & 1) == 1), select(-1, 1, (k & 2) == 2));
     let q = clamp(px + o, vec2i(0), dims - 1);
-    let n = tm(textureLoad(cur, q, 0).rgb);
+    let n = tm(textureLoad(cur, q, 0).rgb * ao);
     mn = min(mn, n); mx = max(mx, n);
     let d = textureLoad(depthTex, q, 0);
     if (d < dmin) { dmin = d; dpx = q; }                 // follow the nearest surface: keeps thin edges (wires) stable
   }
   for (var k = 0; k < 4; k++) {
     let o = vec2i(select(0, select(-1, 1, k == 1), k < 2), select(0, select(-1, 1, k == 3), k >= 2));
-    let n = tm(textureLoad(cur, clamp(px + o, vec2i(0), dims - 1), 0).rgb);
+    let n = tm(textureLoad(cur, clamp(px + o, vec2i(0), dims - 1), 0).rgb * ao);
     mn = min(mn, n); mx = max(mx, n);
   }
   let uv = (vec2f(px) + 0.5) / U.res;
