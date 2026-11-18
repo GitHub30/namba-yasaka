@@ -343,6 +343,38 @@ async function main() {
   if (Q.has("pos")) { const p = Q.get("pos").split(",").map(Number); wasm.teleport(p[0], p[1], p[2] || 0, p[3] ?? 0, p[4] ?? 0, Q.get("fly") === "1" ? 1 : 0); }
   if (Q.has("hour")) wasm.set_hour(Number(Q.get("hour")));
 
+  // ---------------------------------------------------------------- sirens (recordings supplied by the project owner)
+  // One looping sound per vehicle, heard while driving it with the warning lamps on. Decoded with Web Audio so the
+  // loop has no gap; the context can only start after a key press or touch, which getting into a vehicle always is.
+  const siren = { ctx: null, buf: {}, src: null, gain: null, playing: 0 };
+  const sirenFiles = { 1: "siren_police.m4a", 2: "siren_firetruck.m4a" };
+  const sirenInit = () => {
+    if (siren.ctx) { if (siren.ctx.state === "suspended") siren.ctx.resume().catch(() => {}); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    siren.ctx = new AC();
+    for (const [k, file] of Object.entries(sirenFiles)) {
+      fetch(A + file + "?v=" + ((manifest.__versions || {})[file] || BUILD)).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(file + " " + r.status))))
+        .then((b) => siren.ctx.decodeAudioData(b)).then((buf) => { siren.buf[k] = buf; }).catch((e) => console.warn("siren", e));
+    }
+  };
+  for (const ev of ["keydown", "pointerdown", "touchend"]) addEventListener(ev, sirenInit, { passive: true });
+  const sirenSet = (which) => {                           // 0 = silence, 1 = police car, 2 = fire engine
+    if (!siren.ctx || which === siren.playing) return;
+    if (which && !siren.buf[which]) return;               // not decoded yet: try again next frame
+    const t = siren.ctx.currentTime;
+    if (siren.src) { const g = siren.gain, s = siren.src; g.gain.setTargetAtTime(0, t, 0.08); setTimeout(() => { try { s.stop(); } catch {} }, 400); siren.src = null; }
+    siren.playing = which;
+    if (!which) return;
+    const src = siren.ctx.createBufferSource(), gain = siren.ctx.createGain();
+    src.buffer = siren.buf[which]; src.loop = true;
+    gain.gain.setValueAtTime(0, t); gain.gain.setTargetAtTime(Number(Q.get("vol") ?? 0.6), t, 0.12);
+    src.connect(gain).connect(siren.ctx.destination); src.start();
+    siren.src = src; siren.gain = gain;
+  };
+  addEventListener("visibilitychange", () => { if (document.hidden) sirenSet(0); });
+  window.__siren = siren;
+
   // ---------------------------------------------------------------- frame loop
   const fu = new Float32Array(FRAME_FLOATS);
   let last = performance.now(), acc = 0, frames = 0, fps = 0, ms = 0, shadowFrames = 0, tris = 0, draws = 0;
@@ -479,6 +511,7 @@ async function main() {
     q.setPipeline(pPost); q.setBindGroup(0, postBG); q.draw(3); q.end();
     device.queue.submit([enc.finish()]);
 
+    sirenSet(f[89] === 2 && f[93] > 0.5 && !document.hidden ? f[91] : 0);
     const NAMES = ["", "パトカー", "消防車"];
     if (MOBILE) {
       const driving = f[89] === 2;
