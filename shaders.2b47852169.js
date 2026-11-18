@@ -592,6 +592,7 @@ fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
   if (U.fx.y > 0.5) {                                          // temporal AA softens a little: restore crispness
     let lo = min(c, min(min(n, s), min(e, w))); let hi = max(c, max(max(n, s), max(e, w)));
     col = clamp(c + (c - (n + s + e + w) * 0.25) * 1.1, lo, hi);
+    col *= textureSampleLevel(hdr, samp, i.uv, 0.0).a;
   }
   // soft bloom from a wide low-res tap
   var bloom = vec3f(0.0);
@@ -667,21 +668,21 @@ fn itm(c: vec3f) -> vec3f { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4);
   let dims = vec2i(U.res);
   var ao = 1.0;
   if (U.ssao > 0.0) { ao = mix(1.0, ssao(px), U.ssao); }
-  let c = tm(textureLoad(cur, px, 0).rgb * ao);
+  let c = tm(textureLoad(cur, px, 0).rgb);
   var mn = c; var mx = c;
   var dmin = textureLoad(depthTex, px, 0);
   var dpx = px;
   for (var k = 0; k < 4; k++) {
     let o = vec2i(select(-1, 1, (k & 1) == 1), select(-1, 1, (k & 2) == 2));
     let q = clamp(px + o, vec2i(0), dims - 1);
-    let n = tm(textureLoad(cur, q, 0).rgb * ao);
+    let n = tm(textureLoad(cur, q, 0).rgb);
     mn = min(mn, n); mx = max(mx, n);
     let d = textureLoad(depthTex, q, 0);
     if (d < dmin) { dmin = d; dpx = q; }                 // follow the nearest surface: keeps thin edges (wires) stable
   }
   for (var k = 0; k < 4; k++) {
     let o = vec2i(select(0, select(-1, 1, k == 1), k < 2), select(0, select(-1, 1, k == 3), k >= 2));
-    let n = tm(textureLoad(cur, clamp(px + o, vec2i(0), dims - 1), 0).rgb * ao);
+    let n = tm(textureLoad(cur, clamp(px + o, vec2i(0), dims - 1), 0).rgb);
     mn = min(mn, n); mx = max(mx, n);
   }
   let uv = (vec2f(px) + 0.5) / U.res;
@@ -692,7 +693,9 @@ fn itm(c: vec3f) -> vec3f { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4);
   let puv = vec2f(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
   var blend = U.blend;
   if (pc.w <= 0.0 || puv.x < 0.0 || puv.x > 1.0 || puv.y < 0.0 || puv.y > 1.0) { blend = 1.0; }
-  let h = clamp(tm(textureSampleLevel(hist, samp, puv, 0.0).rgb), mn, mx);
-  return vec4f(itm(mix(h, c, blend)), 1.0);
+  let hs = textureSampleLevel(hist, samp, puv, 0.0);
+  let h = clamp(tm(hs.rgb), mn, mx);
+  let aoAcc = select(mix(hs.a, ao, 0.07), ao, blend >= 1.0);
+  return vec4f(itm(mix(h, c, blend)), aoAcc);
 }
 `;

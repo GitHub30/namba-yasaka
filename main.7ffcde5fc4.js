@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.bae73233a1.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.2b47852169.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
