@@ -470,13 +470,13 @@ fn shade(i: VOut, front: bool) -> vec4f {
     let along = dot(i.wpos.xy, vec2f(-N.y, N.x));
     let pitch = 2.2 + fract(bid * 0.37) * 1.6;
     let fl = 3.2;
-    let cu = along / pitch; let cv = (i.wpos.z - 0.9) / fl;
+    let cu = along / pitch; let cv = i.wpos.z / fl;
     let fu = fract(cu); let fv = fract(cv);
     let ww = 0.50 + 0.34 * fract(bid * 0.19);
     let eu = px / pitch * 1.2; let ev = px / fl * 1.2;
     var win = smoothstep(ww * 0.5 + eu, ww * 0.5 - eu, abs(fu - 0.5)) * smoothstep(0.24 - ev, 0.24 + ev, fv) * smoothstep(0.80 + ev, 0.80 - ev, fv);
     let f = lod(0.30, px);
-    win = mix(ww * 0.56, win, f) * step(0.0, cv);
+    win = mix(ww * 0.56, win, f) * step(1.0, cv);
     // aluminium frame and a centre mullion around dark, smooth glass; some rooms have their curtains drawn
     let du = (ww * 0.5 - abs(fu - 0.5)) * pitch; let dv2 = min(fv - 0.24, 0.80 - fv) * fl;
     let inner = smoothstep(0.05, 0.05 + px, min(du, dv2)) * smoothstep(0.02, 0.02 + px, abs(fu - 0.5) * pitch);
@@ -489,6 +489,45 @@ fn shade(i: VOut, front: bool) -> vec4f {
     win = glassK;
     let hc = hash21(vec2f(floor(cu), floor(cv)) + bid * 7.3);
     cityLit = win * mix(0.26, step(0.74, hc), f) * (0.6 + 0.4 * hash21(vec2f(floor(cv), floor(cu)) + bid));
+    // character of the facade from the building seed
+    let wallA = srgbToLinear(i.col.rgb) * d.albedo;
+    let zz = i.wpos.z;
+    if (cv >= 1.0) {
+      let apt = step(0.5, fract(bid * 0.618));
+      // apartment blocks: a solid balcony front across every floor, the wall behind it in its shade, a dark slab edge
+      let bal = apt * (1.0 - smoothstep(0.31 - ev, 0.31 + ev, fv)) * f;
+      let rail = apt * smoothstep(0.035 + ev, 0.0, abs(fv - 0.325)) * f;
+      albedo = mix(albedo * mix(1.0, 0.66, apt * f * (1.0 - win)), wallA * 1.06, bal);
+      albedo = mix(albedo, wallA * 0.45, rail);
+      rough = mix(rough, 0.82, bal);
+      cityLit *= 1.0 - bal;
+      // offices and shops: slab joint under each floor and a tile grid up close
+      let joint = (1.0 - apt) * smoothstep(0.012 + ev, 0.0, min(fv, 1.0 - fv)) * f;
+      let tg = max(smoothstep(0.03, 0.0, abs(fract(along / 0.45) - 0.5) * 0.45 - 0.2175), smoothstep(0.03, 0.0, abs(fract(zz / 0.225) - 0.5) * 0.225 - 0.105));
+      albedo *= 1.0 - joint * 0.30 - (1.0 - apt) * (1.0 - win) * tg * 0.16 * lod(4.5, px);
+    } else {
+      // ground floor: shop bays (glass front or steel shutter) under a sign band, plain bays in between
+      let bw = pitch * 2.0;
+      let bay = floor(along / bw); let bu = fract(along / bw);
+      let hb = hash21(vec2f(bay, bid * 1.7));
+      let eb = px / bw * 1.2;
+      let inBay = smoothstep(0.06 - eb, 0.06 + eb, bu) * smoothstep(0.94 + eb, 0.94 - eb, bu) * f;
+      let shop = step(hb, 0.46); let shut = step(0.46, hb) * step(hb, 0.80);
+      let glassS = inBay * shop * smoothstep(0.32 - px, 0.32 + px, zz) * smoothstep(2.55 + px, 2.55 - px, zz);
+      let frameS = glassS * (1.0 - smoothstep(0.03, 0.03 + px, abs(fract(bu * 3.0) - 0.5) * bw / 3.0));
+      let shutK = inBay * shut * smoothstep(2.60 + px, 2.60 - px, zz);
+      let ribs = 0.5 + 0.5 * sin(zz * 78.0);
+      let sign = inBay * (shop + shut) * smoothstep(2.72 - px, 2.72 + px, zz) * smoothstep(3.14 + px, 3.14 - px, zz);
+      let hue = hash21(vec2f(bay + 5.0, bid));
+      let signC = mix(vec3f(0.62, 0.60, 0.55), 0.5 + 0.5 * cos(6.2832 * (hue + vec3f(0.0, 0.33, 0.67))), 0.45) * 0.55;
+      albedo = mix(albedo, vec3f(0.035, 0.045, 0.055), glassS);
+      albedo = mix(albedo, vec3f(0.30, 0.31, 0.32), frameS);
+      albedo = mix(albedo, vec3f(0.46, 0.47, 0.48) * mix(1.0, mix(0.72, 1.08, ribs), lod(12.0, px)), shutK);
+      albedo = mix(albedo, signC, sign);
+      rough = mix(rough, 0.07, glassS * (1.0 - frameS));
+      rough = mix(rough, 0.42, shutK);
+      cityLit = glassS * (1.0 - frameS) * (0.5 + 0.5 * hash21(vec2f(bay, bid + 3.0))) * 1.3 + sign * 0.25;
+    }
   }
   // bump: perturb in the tangent frame of the dominant axis
   let a = abs(N);

@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.21c485c5a2.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.640c2603ef.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -48,10 +48,11 @@ async function main() {
   };
   const json = (name) => fetch(A + name + "?v=" + ((manifest.__versions || {})[name] || BUILD)).then((r) => { if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`); return r.json(); });
   const VEH = ["police", "firetruck"];
-  const [world, vtxBuf, idxBuf, instBuf, colBuf, wasmBuf, charJ, charV, charI, ...vehData] = await Promise.all([
+  const [world, vtxBuf, idxBuf, instBuf, colBuf, wasmBuf, charJ, charV, charI, cityJ, cityV, cityI, ...vehData] = await Promise.all([
     json("world.json"), bin("world_vtx.bin"), bin("world_idx.bin"), bin("inst.bin"), bin("collide.bin"),
     fetch(new URL("core.wasm?v=" + BUILD, import.meta.url)).then((r) => r.arrayBuffer()),
     json("char.json"), bin("char_vtx.bin"), bin("char_idx.bin"),
+    json("city.json"), bin("city_vtx.bin"), bin("city_idx.bin"),
     ...VEH.flatMap((n) => [json(n + ".json"), bin(n + "_vtx.bin"), bin(n + "_idx.bin")]),
   ]);
   stage("コアを起動中…");
@@ -64,6 +65,24 @@ async function main() {
     return p;
   };
   const C = world.collide;
+  {
+    // surrounding buildings that reach into the walkable area become solid
+    const g = new Uint8Array(colBuf);
+    for (const poly of cityJ.collide || []) {
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      for (const q of poly) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]); }
+      const i0 = Math.max(0, Math.floor((x0 - C.x0) / C.cell)), i1 = Math.min(C.w - 1, Math.ceil((x1 - C.x0) / C.cell));
+      const j0 = Math.max(0, Math.floor((y0 - C.y0) / C.cell)), j1 = Math.min(C.h - 1, Math.ceil((y1 - C.y0) / C.cell));
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        const x = C.x0 + (i + 0.5) * C.cell, y = C.y0 + (j + 0.5) * C.cell; let c = false;
+        for (let k = 0, n = poly.length; k < n; k++) {
+          const a = poly[(k + n - 1) % n], b = poly[k];
+          if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c;
+        }
+        if (c) g[j * C.w + i] = 1;
+      }
+    }
+  }
   wasm.set_collision(put(new Uint8Array(colBuf)), C.w, C.h, C.x0, C.y0, C.cell);
   const chunks = world.chunks;
   const ca = new Float32Array(chunks.length * 7);
@@ -94,67 +113,9 @@ async function main() {
   const L = world.instances.layout;
   const iv = new Uint8Array(instBuf, 0, L.vtx_bytes), ii = new Uint8Array(instBuf, L.vtx_bytes, L.idx_bytes);
   const im = new Uint8Array(instBuf, L.vtx_bytes + L.idx_bytes, L.mat_bytes);
-  // ---- backdrop city: generated blocks around the modelled one, so the streets do not end in a void.
-  // Plain boxes; the shader (kind 27) draws the window grid, weathering and lit rooms at night. No collision: the player cannot leave the block.
-  function buildCity(b) {
-    let seed = 20261118;
-    const rnd = () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-    const V = [], I = []; let nv = 0;
-    const oct = (n) => { const s = Math.abs(n[0]) + Math.abs(n[1]) + Math.abs(n[2]); let x = n[0] / s, y = n[1] / s; if (n[2] < 0) { const ox = x; x = (1 - Math.abs(y)) * (ox >= 0 ? 1 : -1); y = (1 - Math.abs(ox)) * (y >= 0 ? 1 : -1); } return [Math.round(x * 32767), Math.round(y * 32767)]; };
-    const quad = (P, n, col, rough, kind, id, ao0, ao1) => {
-      const o = oct(n);
-      P.forEach((q, k) => V.push({ p: q, o, c: col, r: rough, m: [kind, id, 0, k < 2 ? ao0 : ao1] }));
-      I.push(nv, nv + 1, nv + 2, nv, nv + 2, nv + 3); nv += 4;
-    };
-    const box = (x0, y0, x1, y1, z0, z1, col, kind, id) => {
-      const c = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-      for (let k = 0; k < 4; k++) {
-        const a = c[k], d = c[(k + 1) % 4], dx = d[0] - a[0], dy = d[1] - a[1], l = Math.hypot(dx, dy);
-        quad([[a[0], a[1], z0], [d[0], d[1], z0], [d[0], d[1], z1], [a[0], a[1], z1]], [dy / l, -dx / l, 0], col, 205, kind, id, z0 < 1 ? 150 : 235, 255);
-      }
-      quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1], [128, 128, 126], 225, 2, 0, 255, 255);
-    };
-    const PAL = [[200, 198, 190], [172, 170, 162], [216, 211, 199], [152, 142, 130], [124, 88, 68], [190, 176, 152], [104, 108, 114], [228, 226, 220], [176, 182, 186], [140, 132, 120]];
-    const W = b.max[0] - b.min[0], H = b.max[1] - b.min[1], R = 4;
-    const lots = [];
-    const split = (x0, y0, x1, y1) => {
-      const w = x1 - x0, h = y1 - y0, lim = 13 + rnd() * 15;
-      if (w <= lim && h <= lim * 1.25) { lots.push([x0, y0, x1, y1]); return; }
-      if (w > h) { const m = x0 + w * (0.35 + 0.3 * rnd()); split(x0, y0, m, y1); split(m, y0, x1, y1); }
-      else { const m = y0 + h * (0.35 + 0.3 * rnd()); split(x0, y0, x1, m); split(x0, m, x1, y1); }
-    };
-    for (let j = -R; j <= R; j++) for (let i = -R; i <= R; i++) {
-      if (!i && !j) continue;
-      const x0 = b.min[0] + i * W, y0 = b.min[1] + j * H, x1 = x0 + W, y1 = y0 + H;
-      quad([[x0, y0, -0.03], [x1, y0, -0.03], [x1, y1, -0.03], [x0, y1, -0.03]], [0, 0, 1], [96, 96, 98], 230, 1, 0, 255, 255);          // roads
-      quad([[x0 + 5, y0 + 5, 0.13], [x1 - 5, y0 + 5, 0.13], [x1 - 5, y1 - 5, 0.13], [x0 + 5, y1 - 5, 0.13]], [0, 0, 1], [150, 148, 142], 225, 2, 0, 255, 255);   // pavement
-      lots.length = 0; split(x0 + 7, y0 + 7, x1 - 7, y1 - 7);
-      for (const l of lots) {
-        if (rnd() < 0.06) continue;                                           // a car park here and there
-        const g = 0.4 + rnd() * 1.0, r = rnd();
-        const floors = r < 0.60 ? 2 + Math.floor(rnd() * 3) : r < 0.94 ? 5 + Math.floor(rnd() * 6) : 11 + Math.floor(rnd() * 10);
-        const h = floors * 3.2 + 0.9, col = PAL[Math.floor(rnd() * PAL.length)], id = 1 + Math.floor(rnd() * 254);
-        const a = [l[0] + g, l[1] + g, l[2] - g, l[3] - g];
-        box(a[0], a[1], a[2], a[3], 0.13, h, col, 27, id);
-        if (floors > 3 && rnd() < 0.7) {                                      // stair / lift housing, water tank
-          const cx = a[0] + (a[2] - a[0]) * (0.25 + 0.5 * rnd()), cy = a[1] + (a[3] - a[1]) * (0.25 + 0.5 * rnd());
-          box(cx - 1.8, cy - 1.5, cx + 1.8, cy + 1.5, h, h + 2.6, col.map((v) => v * 0.92), 2, 0);
-        }
-      }
-    }
-    const E = 2600, cx = (b.min[0] + b.max[0]) / 2, cy = (b.min[1] + b.max[1]) / 2;                                                  // far ground
-    quad([[cx - E, cy - E, -0.12], [cx + E, cy - E, -0.12], [cx + E, cy + E, -0.12], [cx - E, cy + E, -0.12]], [0, 0, 1], [118, 118, 116], 235, 2, 0, 255, 255);
-    const buf = new ArrayBuffer(nv * 24), dv = new DataView(buf);
-    V.forEach((v, k) => {
-      const o = k * 24;
-      dv.setFloat32(o, v.p[0], true); dv.setFloat32(o + 4, v.p[1], true); dv.setFloat32(o + 8, v.p[2], true);
-      dv.setInt16(o + 12, v.o[0], true); dv.setInt16(o + 14, v.o[1], true);
-      dv.setUint8(o + 16, v.c[0]); dv.setUint8(o + 17, v.c[1]); dv.setUint8(o + 18, v.c[2]); dv.setUint8(o + 19, v.r);
-      dv.setUint8(o + 20, v.m[0]); dv.setUint8(o + 21, v.m[1]); dv.setUint8(o + 22, v.m[2]); dv.setUint8(o + 23, v.m[3]);
-    });
-    return { vtx: buf, idx: new Uint32Array(I) };
-  }
-  const city = buildCity(world.bounds);
+  // ---- surrounding city: real footprints and heights (PLATEAU LOD1) and road polygons, exported by tools/export_city.py.
+  // The shader (kind 27) draws the window grid, weathering and lit rooms at night.
+  const city = { vtx: cityV, idx: new Uint32Array(cityI) };
   const CVB = mkBuf(city.vtx, GPUBufferUsage.VERTEX), CIB = mkBuf(city.idx, GPUBufferUsage.INDEX);
   const IVB = mkBuf(iv, GPUBufferUsage.VERTEX), IIB = mkBuf(ii, GPUBufferUsage.INDEX), IMB = mkBuf(im, GPUBufferUsage.VERTEX);
   const hasInst = L.count > 0;
