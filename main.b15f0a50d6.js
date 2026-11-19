@@ -639,7 +639,7 @@ async function main() {
         v.info.wheels.forEach((_, i) => sd(v.info.parts.wheel, v.base + 1 + i));
         ["door_r", "door_l"].forEach((n, k) => { if (v.info.parts[n]) sd(v.info.parts[n], v.door + k); });
       }
-      if (f[92] < 0.5 || f[94] > 0.5) {                               // in first person the body is hidden but still casts a shadow
+      if ((f[92] < 0.5 || f[94] > 0.5) && f[89] !== 2) {              // in first person the body is hidden but still casts a shadow
         sp.setPipeline(pShadowSkin); sp.setBindGroup(0, bgDynShadow); sp.setBindGroup(1, bgModel, [12 * DYN_ALIGN]); sp.setBindGroup(2, bgSkin);
         sp.setVertexBuffer(0, rab.vb); sp.setIndexBuffer(rab.ib, "uint32"); sp.drawIndexed(rab.count, 1, 0, 0, 0);
         sp.setPipeline(pShadowDyn); sp.setBindGroup(0, bgDynShadow);
@@ -673,7 +673,7 @@ async function main() {
       v.info.wheels.forEach((_, i) => drawDyn(p, v, v.info.parts.wheel, v.base + 1 + i));
       ["door_r", "door_l"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
-    if (f[92] < 0.5) {
+    if (f[92] < 0.5 && f[89] !== 2) {                                 // seated, the rabbit's ears would stick through the roof: not drawn while driving
       p.setPipeline(pSkin); p.setBindGroup(1, bgModel, [12 * DYN_ALIGN]); p.setBindGroup(2, bgSkin);
       p.setVertexBuffer(0, rab.vb); p.setIndexBuffer(rab.ib, "uint32"); p.drawIndexed(rab.count, 1, 0, 0, 0); tris += rab.count / 3; draws++;
       p.setPipeline(pDyn);
