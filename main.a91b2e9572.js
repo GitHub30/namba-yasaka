@@ -1,5 +1,5 @@
 // WebGPU host: loads the baked world + the Rust/WASM core, renders with hand-written WGSL. No rendering libraries.
-import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.640c2603ef.js";
+import { COMMON, WORLD, SKY, POST, TAA } from "./shaders.223b8177d1.js";
 
 const $ = (id) => document.getElementById(id);
 const hud = $("hud"), msg = $("msg"), canvas = $("c");
@@ -48,11 +48,14 @@ async function main() {
   };
   const json = (name) => fetch(A + name + "?v=" + ((manifest.__versions || {})[name] || BUILD)).then((r) => { if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`); return r.json(); });
   const VEH = ["police", "firetruck"];
-  const [world, vtxBuf, idxBuf, instBuf, colBuf, wasmBuf, charJ, charV, charI, cityJ, cityV, cityI, ...vehData] = await Promise.all([
+  const [world, vtxBuf, idxBuf, instBuf, colBuf, wasmBuf, charJ, charV, charI, cityJ, cityV, cityI, rabJ, rabV, rabI, rabA, rabC, rabO, ...vehData] = await Promise.all([
     json("world.json"), bin("world_vtx.bin"), bin("world_idx.bin"), bin("inst.bin"), bin("collide.bin"),
     fetch(new URL("core.wasm?v=" + BUILD, import.meta.url)).then((r) => r.arrayBuffer()),
     json("char.json"), bin("char_vtx.bin"), bin("char_idx.bin"),
     json("city.json"), bin("city_vtx.bin"), bin("city_idx.bin"),
+    json("rabbit.json"), bin("rabbit_vtx.bin"), bin("rabbit_idx.bin"), bin("rabbit_anim.bin"),
+    ...["rabbit_color.png", "rabbit_orm.png"].map((n) => fetch(A + n + "?v=" + BUILD).then((r) => { if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`); return r.blob(); })
+      .then((b) => createImageBitmap(b, { resizeWidth: 1024, resizeHeight: 1024, resizeQuality: "high", colorSpaceConversion: "none" }))),
     ...VEH.flatMap((n) => [json(n + ".json"), bin(n + "_vtx.bin"), bin(n + "_idx.bin")]),
   ]);
   stage("コアを起動中…");
@@ -193,6 +196,110 @@ async function main() {
     layout: device.createPipelineLayout({ bindGroupLayouts: [lFrame, lModel] }), vertex: { module: modWorld, entryPoint: "vsShadowDyn", buffers: [vAttr] },
     primitive: { topology: "triangle-list", cullMode: "none" },
     depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 2.0 } });
+  // ---- skinned player character (assets/rabbit.*, from tools/export_rabbit.py)
+  const NJ = rabJ.joints.length;
+  const lSkin = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+    { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} }] });
+  const sAttr = { arrayStride: 32, attributes: [
+    { shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 1, offset: 12, format: "snorm16x2" },
+    { shaderLocation: 2, offset: 16, format: "float32x2" }, { shaderLocation: 3, offset: 24, format: "uint8x4" }, { shaderLocation: 4, offset: 28, format: "unorm8x4" }] };
+  const mkTex = (bmp) => {
+    // mip chain built on the CPU side with canvas scaling: the character is small on screen most of the time
+    const levels = Math.floor(Math.log2(bmp.width)) + 1;
+    const t = device.createTexture({ size: [bmp.width, bmp.height], format: "rgba8unorm", mipLevelCount: levels,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+    let src = bmp;
+    for (let l = 0; l < levels; l++) {
+      const w = Math.max(1, bmp.width >> l), h = Math.max(1, bmp.height >> l);
+      if (l > 0) { const c = new OffscreenCanvas(w, h); const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(src, 0, 0, w, h); src = c; }
+      device.queue.copyExternalImageToTexture({ source: src }, { texture: t, mipLevel: l }, [w, h]);
+    }
+    return t.createView();
+  };
+  const skinUBO = device.createBuffer({ size: 24 * 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const skinData = new Float32Array(24 * 16);
+  const triSamp = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", maxAnisotropy: 4 });
+  const bgSkin = device.createBindGroup({ layout: lSkin, entries: [{ binding: 0, resource: { buffer: skinUBO } },
+    { binding: 1, resource: mkTex(rabC) }, { binding: 2, resource: mkTex(rabO) }, { binding: 3, resource: triSamp }] });
+  const pSkin = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [lWorld, lModel, lSkin] }), vertex: { module: modWorld, entryPoint: "vsSkin", buffers: [sAttr] },
+    fragment: { module: modWorld, entryPoint: "fsSkin", targets: [{ format: HDR }] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: "less" } });
+  const pShadowSkin = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [lFrame, lModel, lSkin] }), vertex: { module: modWorld, entryPoint: "vsShadowSkin", buffers: [sAttr] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 2.0 } });
+  const rab = { vb: mkBuf(rabV, GPUBufferUsage.VERTEX), ib: mkBuf(rabI, GPUBufferUsage.INDEX), count: rabJ.ni, anim: new Float32Array(rabA),
+    clip: Object.fromEntries(rabJ.clips.map((c) => [c.name, c])), w: { Walk: 0, Run: 0, Jump: 0, Sit: 0 }, t: { Walk: 0, Run: 0 },
+    air: -1, last: null, seat: 0, scale: 1.72 / rabJ.height };
+  const REST = rabJ.joints.map((j) => [...j.t, ...j.r, ...j.s]);
+  const IBM = rabJ.joints.map((j) => Float32Array.from(j.ibm));
+  const mul4 = (a, b, o) => {            // column-major 4x4: o = a * b
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+      o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    return o;
+  };
+  const jw = rabJ.joints.map(() => new Float32Array(16)), jl = new Float32Array(16), jp = new Float32Array(10), tmpM = new Float32Array(16);
+  // sample one clip at time t (seconds) for joint k into out[10] (translation, quaternion, scale)
+  const sampleClip = (c, t, k, out) => {
+    const ft = Math.max(0, Math.min(c.frames - 1.001, t * rabJ.fps)), f0 = Math.floor(ft), u = ft - f0;
+    const a = c.offset + (f0 * NJ + k) * 10, b = a + NJ * 10;
+    for (let i = 0; i < 10; i++) out[i] = rab.anim[a + i] + (rab.anim[b + i] - rab.anim[a + i]) * u;
+  };
+  const tmpP = new Float32Array(10);
+  // pose from the game state: clip weights follow speed / air / seat, the remainder is the rest pose
+  function animateRabbit(f, dyn, dt) {
+    const mode = f[89], jz = f[95];
+    let v = 0;
+    if (rab.last && dt > 0) v = Math.hypot(f[68] - rab.last[0], f[69] - rab.last[1]) / dt;
+    rab.last = [f[68], f[69]];
+    if (mode !== 0) v = mode === 2 ? 0 : 1.2;
+    if (jz > 0 && rab.air < 0) rab.air = 0; else if (jz <= 0) rab.air = -1;
+    if (rab.air >= 0) rab.air += dt;
+    const tgt = { Walk: 0, Run: 0, Jump: 0, Sit: 0 };
+    if (mode === 2) tgt.Sit = 1; else if (rab.air >= 0) tgt.Jump = 1; else if (v > 3.0) tgt.Run = 1; else if (v > 0.15) tgt.Walk = 1;
+    const k = Math.min(1, dt * 10);
+    for (const n in tgt) rab.w[n] += (tgt[n] - rab.w[n]) * (n === "Jump" && tgt.Jump ? Math.min(1, dt * 25) : k);
+    rab.seat += ((mode === 2 ? 1 : mode === 1 ? 0.6 : 0) - rab.seat) * Math.min(1, dt * 5);
+    rab.t.Walk = (rab.t.Walk + dt * Math.max(0.6, v / 1.45)) % rab.clip.Walk.duration;
+    rab.t.Run = (rab.t.Run + dt * Math.max(0.7, v / 5.2)) % rab.clip.Run.duration;
+    const times = { Walk: rab.t.Walk, Run: rab.t.Run, Jump: Math.max(0, rab.air) * rab.clip.Jump.duration, Sit: rab.clip.Sit.duration * 0.45 };
+    let hips = rabJ.hips;
+    for (const kj of rabJ.order) {
+      const R = REST[kj];
+      let ws = 0; jp.fill(0);
+      for (const n in rab.w) {
+        const w = rab.w[n]; if (w < 0.002 || !rab.clip[n]) continue;
+        sampleClip(rab.clip[n], times[n], kj, tmpP);
+        const sgn = tmpP[3] * R[3] + tmpP[4] * R[4] + tmpP[5] * R[5] + tmpP[6] * R[6] < 0 ? -1 : 1;
+        for (let i = 0; i < 10; i++) jp[i] += tmpP[i] * w * (i >= 3 && i < 7 ? sgn : 1);
+        ws += w;
+      }
+      const wr = Math.max(0, 1 - ws), inv = 1 / (ws + wr);
+      for (let i = 0; i < 10; i++) jp[i] = (jp[i] + R[i] * wr) * inv;
+      const ql = Math.hypot(jp[3], jp[4], jp[5], jp[6]) || 1, x = jp[3] / ql, y = jp[4] / ql, z = jp[5] / ql, w = jp[6] / ql;
+      const sx = jp[7], sy = jp[8], sz = jp[9];
+      jl[0] = (1 - 2 * (y * y + z * z)) * sx; jl[1] = 2 * (x * y + z * w) * sx; jl[2] = 2 * (x * z - y * w) * sx; jl[3] = 0;
+      jl[4] = 2 * (x * y - z * w) * sy; jl[5] = (1 - 2 * (x * x + z * z)) * sy; jl[6] = 2 * (y * z + x * w) * sy; jl[7] = 0;
+      jl[8] = 2 * (x * z + y * w) * sz; jl[9] = 2 * (y * z - x * w) * sz; jl[10] = (1 - 2 * (x * x + y * y)) * sz; jl[11] = 0;
+      jl[12] = jp[0]; jl[13] = jp[1]; jl[14] = jp[2]; jl[15] = 1;
+      const par = rabJ.joints[kj].parent;
+      if (par < 0) jw[kj].set(jl); else mul4(jw[par], jl, jw[kj]);
+      if (rabJ.joints[kj].name === "Hips") hips = jw[kj][13];
+      skinData.set(mul4(jw[kj], IBM[kj], tmpM), kj * 16);
+    }
+    device.queue.writeBuffer(skinUBO, 0, skinData);
+    // root: the core's torso matrix (origin at the human pelvis); on foot the feet stand on the ground below it,
+    // seated the rabbit's own hips sit where the pelvis is. glTF y-up / z-forward -> game z-up / x-forward.
+    const T = dyn.subarray(12 * 20, 12 * 20 + 16), S = rab.scale;
+    const drop = 0.955 + 0.03 + (hips * S - 0.985) * rab.seat;
+    const local = new Float32Array([0, S, 0, 0, 0, 0, S, 0, S, 0, 0, 0, 0, 0, -drop, 1]);
+    return mul4(T, local, new Float32Array(16));
+  }
   const pOpaque = mkMain("vsWorld", [vAttr], undefined, true);
   const pInst = mkMain("vsInst", [vAttr, iAttr], undefined, true);
   const pTrans = mkMain("vsWorld", [vAttr], alphaBlend, false);
@@ -381,7 +488,7 @@ async function main() {
     };
     tap("bUse", () => { once.use = true; }); tap("bBeacon", () => { once.beacon = true; }); tap("bLeft", () => { once.left = true; });
     tap("bRight", () => { once.right = true; }); tap("bView", () => { once.view = true; });
-    hold("bBrake", "brake"); hold("bRun", "run");
+    hold("bBrake", "brake"); hold("bJump", "brake"); hold("bRun", "run");
     rootEl.addEventListener("contextmenu", (e) => e.preventDefault());
     document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
   }
@@ -513,6 +620,7 @@ async function main() {
     }
     const dyn = new Float32Array(mem(), wasm.dyn_ptr(), N_DYN * 20);
     for (let i = 0; i < N_DYN; i++) dynData.set(dyn.subarray(i * 20, i * 20 + 20), (i * DYN_ALIGN) / 4);
+    { const tn = performance.now(); dynData.set(animateRabbit(f, dyn, Math.min(0.1, Math.max(0, (tn - (rab.now ?? tn)) / 1000))), (12 * DYN_ALIGN) / 4); rab.now = tn; }
     device.queue.writeBuffer(dynUBO, 0, dynData);
     const enc = device.createCommandEncoder();
     if (f[64] > 0.5 || shadowFrames === 0) {
@@ -532,8 +640,9 @@ async function main() {
         ["door_r", "door_l"].forEach((n, k) => { if (v.info.parts[n]) sd(v.info.parts[n], v.door + k); });
       }
       if (f[92] < 0.5 || f[94] > 0.5) {                               // in first person the body is hidden but still casts a shadow
-        sp.setVertexBuffer(0, chr.vb); sp.setIndexBuffer(chr.ib, "uint32");
-        chr.info.order.forEach((name, i) => sd(chr.info.parts[name], chr.base + i));
+        sp.setPipeline(pShadowSkin); sp.setBindGroup(0, bgDynShadow); sp.setBindGroup(1, bgModel, [12 * DYN_ALIGN]); sp.setBindGroup(2, bgSkin);
+        sp.setVertexBuffer(0, rab.vb); sp.setIndexBuffer(rab.ib, "uint32"); sp.drawIndexed(rab.count, 1, 0, 0, 0);
+        sp.setPipeline(pShadowDyn); sp.setBindGroup(0, bgDynShadow);
       }
       if (PVB) { sp.setVertexBuffer(0, PVB); sp.setIndexBuffer(PIB, "uint32"); for (let i = 0; i < props.length; i++) sd(props[i], 26 + i); }
       sp.end();
@@ -565,8 +674,9 @@ async function main() {
       ["door_r", "door_l"].forEach((n, k) => { if (v.info.parts[n]) drawDyn(p, v, v.info.parts[n], v.door + k); });
     }
     if (f[92] < 0.5) {
-      p.setVertexBuffer(0, chr.vb); p.setIndexBuffer(chr.ib, "uint32");
-      chr.info.order.forEach((name, i) => drawDyn(p, chr, chr.info.parts[name], chr.base + i));
+      p.setPipeline(pSkin); p.setBindGroup(1, bgModel, [12 * DYN_ALIGN]); p.setBindGroup(2, bgSkin);
+      p.setVertexBuffer(0, rab.vb); p.setIndexBuffer(rab.ib, "uint32"); p.drawIndexed(rab.count, 1, 0, 0, 0); tris += rab.count / 3; draws++;
+      p.setPipeline(pDyn);
     }
     if (PVB) {
       p.setVertexBuffer(0, PVB); p.setIndexBuffer(PIB, "uint32");

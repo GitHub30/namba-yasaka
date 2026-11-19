@@ -36,7 +36,7 @@
   .tb.red.on { background: rgba(230, 30, 30, .72); }
   .tb.amber.on { background: rgba(240, 150, 10, .72); }
   #bUse { right: max(22px, env(safe-area-inset-right)); bottom: 108px; }
-  #bBrake { right: max(110px, calc(env(safe-area-inset-right) + 88px)); bottom: 22px; }
+  #bBrake, #bJump { right: max(110px, calc(env(safe-area-inset-right) + 88px)); bottom: 22px; }
   #bRun { right: max(22px, env(safe-area-inset-right)); bottom: 22px; }
   #bBeacon { right: max(22px, env(safe-area-inset-right)); top: 14px; }
   #bLeft { right: max(178px, calc(env(safe-area-inset-right) + 156px)); top: 14px; }
@@ -48,11 +48,11 @@
   body.mobile.rotated #root { width: 100vh; width: 100dvh; height: 100vw; transform-origin: 0 0; transform: translateX(100vw) rotate(90deg); }
 </style>
 </head>
-<body data-assets="assets/" data-build="1118-1812-e230">
+<body data-assets="assets/" data-build="1119-0904-a91b">
 <div id="root">
   <canvas id="c"></canvas>
   <div id="hud"></div>
-  <div id="help">クリック（またはドラッグ）で視点操作   WASD 移動   Shift 走る   V 一人称/三人称
+  <div id="help">クリック（またはドラッグ）で視点操作   WASD 移動   Shift 走る   Space ジャンプ   V 一人称/三人称
 E 車の乗り降り   車内: W/S アクセル・後退  A/D ハンドル  Space ブレーキ
 L 赤色灯とサイレン   Z/C 左右のウインカー（曲がるときは自動で点滅）
 F 飛行カメラ (Q/E 上下)   T 時間を進める/止める   [ ] 時刻 ±1h   - = 解像度   H 表示切替</div>
@@ -62,6 +62,7 @@ F 飛行カメラ (Q/E 上下)   T 時間を進める/止める   [ ] 時刻 ±1
     <div id="stick"><div id="knob"></div></div>
     <div class="tb big" id="bUse">乗る</div>
     <div class="tb drive-only" id="bBrake">ブレーキ</div>
+    <div class="tb walk-only" id="bJump">ジャンプ</div>
     <div class="tb walk-only" id="bRun">走る</div>
     <div class="tb red drive-only" id="bBeacon">赤色灯</div>
     <div class="tb amber drive-only" id="bLeft">◀</div>
@@ -72,6 +73,6 @@ F 飛行カメラ (Q/E 上下)   T 時間を進める/止める   [ ] 時刻 ±1
   <div id="msg">読み込み中…</div>
   <div id="start"><div>画面をタップして開始<br><small>全画面・横向きに切り替わります</small></div></div>
 </div>
-<script type="module" src="main.e230df5fea.js"></script>
+<script type="module" src="main.a91b2e9572.js"></script>
 </body>
 </html>

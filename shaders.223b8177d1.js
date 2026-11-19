@@ -200,6 +200,39 @@ struct Model { m: mat4x4f, lights: vec4f };
   return o;
 }
 
+// ---- skinned player character: 24 joint matrices, base colour + occlusion/roughness/metallic textures
+struct Skin { j: array<mat4x4f, 24> };
+@group(2) @binding(0) var<uniform> SK: Skin;
+@group(2) @binding(1) var skinColor: texture_2d<f32>;
+@group(2) @binding(2) var skinOrm: texture_2d<f32>;
+@group(2) @binding(3) var skinSamp: sampler;
+struct SIn {
+  @location(0) pos: vec3f,
+  @location(1) nrm: vec2f,
+  @location(2) uv: vec2f,
+  @location(3) joints: vec4u,
+  @location(4) weights: vec4f,
+};
+struct SOut {
+  @builtin(position) clip: vec4f,
+  @location(0) wpos: vec3f,
+  @location(1) nrm: vec3f,
+  @location(2) uv: vec2f,
+  @location(3) lpos: vec3f,
+};
+fn skinMatrix(v: SIn) -> mat4x4f {
+  return SK.j[v.joints.x] * v.weights.x + SK.j[v.joints.y] * v.weights.y + SK.j[v.joints.z] * v.weights.z + SK.j[v.joints.w] * v.weights.w;
+}
+@vertex fn vsSkin(v: SIn) -> SOut {
+  var o: SOut;
+  let sm = M.m * skinMatrix(v);
+  let p = sm * vec4f(v.pos, 1.0);
+  o.wpos = p.xyz; o.nrm = normalize((sm * vec4f(octDecode(v.nrm), 0.0)).xyz); o.uv = v.uv; o.lpos = v.pos;
+  o.clip = F.viewProj * p;
+  return o;
+}
+@vertex fn vsShadowSkin(v: SIn) -> @builtin(position) vec4f { return F.lightViewProj * (M.m * skinMatrix(v) * vec4f(v.pos, 1.0)); }
+
 @vertex fn vsShadow(v: VIn) -> @builtin(position) vec4f { return F.lightViewProj * vec4f(v.pos, 1.0); }
 @vertex fn vsShadowDyn(v: VIn) -> @builtin(position) vec4f { return F.lightViewProj * (M.m * vec4f(v.pos, 1.0)); }
 @vertex fn vsShadowInst(v: VIn, i: IIn) -> @builtin(position) vec4f {
@@ -698,6 +731,18 @@ fn shade(i: VOut, front: bool) -> vec4f {
 }
 
 @fragment fn fsWorld(i: VOut, @builtin(front_facing) ff: bool) -> FOut { var o: FOut; o.color = shade(i, ff); return o; }
+@fragment fn fsSkin(i: SOut, @builtin(front_facing) ff: bool) -> FOut {
+  let c = textureSample(skinColor, skinSamp, i.uv);
+  let orm = textureSample(skinOrm, skinSamp, i.uv);
+  var v: VOut;
+  v.clip = i.clip; v.wpos = i.wpos; v.nrm = i.nrm; v.lpos = i.lpos;
+  v.col = vec4f(c.rgb, orm.g);                               // the texture holds sRGB values, like the vertex colours
+  v.mat = vec4u(0u, u32(clamp(orm.b, 0.0, 1.0) * 255.0), 0u, 255u);
+  v.fade = 0.0; v.lights = vec4f(0.0); v.ao = 1.0;
+  var o: FOut; o.color = shade(v, ff);
+  o.color = vec4f(o.color.rgb * mix(0.55, 1.0, orm.r), o.color.a);
+  return o;
+}
 `;
 
 export const SKY = /* wgsl */`
